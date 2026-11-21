@@ -780,3 +780,91 @@ async function handlers(req: any, res: any, next: any, ctx: any, raw: string) {
   assert.equal(report.findings[0]?.ruleId, 'error-swallowing');
   assert.equal(report.findings[0]?.symbolName, 'catch (err)');
 });
+
+test('detects Next.js Pages API routes, Server Actions, Hapi routes, and Agenda jobs with coverage stats', () => {
+  const pagesApiCode = `
+export default async function handler(req: any, res: any) {
+  const userId = req.query.id;
+  const user = await loadUser(userId);
+  res.status(200).json(user);
+}
+`;
+
+  const serverActionsCode = `
+'use server';
+export async function updateBillingPlan(customerId: string, planId: string) {
+  const customer = await loadCustomer(customerId);
+  await stripe.subscriptions.update(customer.subId, { plan: planId });
+  return { ok: true };
+}
+
+export async function createInvoice(customerId: string) {
+  return tracer.startActiveSpan('billing.create_invoice', async (span) => {
+    const inv = await stripe.invoices.create({ customer: customerId });
+    span.end();
+    return inv;
+  });
+}
+`;
+
+  const hapiAndAgendaCode = `
+server.route({
+  method: 'POST',
+  path: '/v1/payouts',
+  handler: async (request: any, h: any) => {
+    const payout = await createPayout(request.payload);
+    await notifyFinance(payout.id);
+    return h.response(payout).code(201);
+  },
+});
+
+agenda.define('nightly-reconcile', async (job: any) => {
+  const rows = await loadPendingLedgerEntries();
+  await reconcileEntries(rows);
+});
+`;
+
+  const report = analyzeTargets(
+    [
+      { filePath: 'pages/api/users.ts', content: pagesApiCode },
+      { filePath: 'app/actions/billing.ts', content: serverActionsCode },
+      { filePath: 'src/server.ts', content: hapiAndAgendaCode },
+    ],
+    DEFAULT_CONFIG,
+  );
+
+  assert.equal(report.checkedUnits, 5);
+  assert.equal(report.passedUnits, 1);
+  assert.equal(report.coveragePercent, 20);
+  assert.equal(report.errorsCount, 1);
+  assert.equal(report.warningsCount, 3);
+  assert.deepEqual(
+    report.findings.map((f) => ({
+      ruleId: f.ruleId,
+      framework: f.framework,
+      symbolName: f.symbolName,
+    })),
+    [
+      {
+        ruleId: 'http-handlers',
+        framework: 'nextjs-server-action',
+        symbolName: 'action updateBillingPlan',
+      },
+      {
+        ruleId: 'http-handlers',
+        framework: 'nextjs-pages',
+        symbolName: 'API pages/api/users.ts',
+      },
+      {
+        ruleId: 'http-handlers',
+        framework: 'hapi',
+        symbolName: 'POST /v1/payouts',
+      },
+      {
+        ruleId: 'queue-consumers',
+        framework: 'agenda',
+        symbolName: 'agenda.define(nightly-reconcile)',
+      },
+    ],
+  );
+});

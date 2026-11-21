@@ -26,6 +26,10 @@ inputs:
     description: 'Emit inline GitHub Actions warning/error annotations on changed lines'
     required: false
     default: 'true'
+  sarif-file:
+    description: 'Optional output path to write a SARIF 2.1.0 report for GitHub Code Scanning'
+    required: false
+    default: ''
 
 outputs:
   findings-count:
@@ -34,6 +38,8 @@ outputs:
     description: 'Number of error-severity telemetry gaps'
   warnings-count:
     description: 'Number of warning-severity telemetry gaps'
+  coverage-percent:
+    description: 'Percentage of touched handlers, workers, catch blocks, and spans passing telemetry checks'
 
 runs:
   using: 'node20'

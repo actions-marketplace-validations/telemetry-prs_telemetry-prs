@@ -9,20 +9,24 @@ import {
 } from './analyzer/index.ts';
 import { loadConfig } from './config.ts';
 import { parseUnifiedDiff } from './diff.ts';
+import { runInit } from './init.ts';
 import {
   formatPrComment,
   formatTerminalReport,
 } from './reporter/markdown.ts';
+import { formatSarifReport } from './reporter/sarif.ts';
 import type { CheckMode, TelemetryConfig } from './types.ts';
 
 function printUsage(): void {
   console.log(`Usage:
-  telemetry-prs check [--base <ref>] [--config <path>] [--mode comment|fail] [--format text|markdown|json]
-  telemetry-prs scan <dir-or-file> [--config <path>] [--mode comment|fail] [--format text|markdown|json]
+  telemetry-prs check [--base <ref>] [--config <path>] [--mode comment|fail] [--format text|markdown|json|sarif]
+  telemetry-prs scan <dir-or-file> [--config <path>] [--mode comment|fail] [--format text|markdown|json|sarif]
+  telemetry-prs init [--workflow] [--force]
 
 Commands:
   check   Analyze git diff against <ref> (default: HEAD; or staged/working tree)
   scan    Scan all matching TS/JS files in a directory or single file (ignores git diff)
+  init    Generate .telemetry-prs.yml tailored to your repo (and optional GitHub workflow)
 `);
 }
 
@@ -73,6 +77,34 @@ function main(): void {
   }
 
   const cwd = process.cwd();
+
+  if (command === 'init') {
+    const result = runInit({
+      cwd,
+      workflow: args.includes('--workflow'),
+      force: args.includes('--force'),
+    });
+    if (result.configWritten) {
+      console.log(`Created ${result.configPath}`);
+    } else {
+      console.log(`Skipped ${result.configPath} (already exists; pass --force to overwrite)`);
+    }
+    if (result.workflowPath) {
+      if (result.workflowWritten) {
+        console.log(`Created ${result.workflowPath}`);
+      } else {
+        console.log(`Skipped ${result.workflowPath} (already exists; pass --force to overwrite)`);
+      }
+    }
+    if (result.detectedPackages.length > 0) {
+      console.log(`Detected telemetry/logging packages: ${result.detectedPackages.join(', ')}`);
+    }
+    if (result.detectedDirs.length > 0) {
+      console.log(`Detected source directories: ${result.detectedDirs.join(', ')}`);
+    }
+    process.exit(0);
+  }
+
   const configPath = parseFlag(args, '--config') ?? '.telemetry-prs.yml';
   const modeOverride = parseFlag(args, '--mode') as CheckMode | undefined;
   const format = parseFlag(args, '--format') ?? 'text';
@@ -122,6 +154,8 @@ function main(): void {
     console.log(JSON.stringify(report, null, 2));
   } else if (format === 'markdown') {
     console.log(formatPrComment(report));
+  } else if (format === 'sarif') {
+    console.log(formatSarifReport(report));
   } else {
     console.log(formatTerminalReport(report));
   }

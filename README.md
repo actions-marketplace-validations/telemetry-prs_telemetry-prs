@@ -2,13 +2,13 @@
 
 Catch missing OpenTelemetry spans, metrics, and logs in TypeScript/Node.js pull requests — **fast, static, vendor-neutral, and 100% inside your CI**.
 
-Auto-instrumentation covers HTTP and database calls, not the business logic, background jobs, queue consumers, and silent catch blocks that leave teams blind during outages. Telemetry PRs runs on every PR diff and flags uninstrumented code paths before they merge.
+Auto-instrumentation covers HTTP and database calls, not the business logic, background jobs, queue consumers, and silent catch blocks that leave teams blind during outages. Telemetry PRs runs on every PR diff, reports touched-code telemetry coverage, and flags uninstrumented paths before they merge.
 
 ## Why CI-native & static?
 
 - **Your code never leaves your CI runner.** No SaaS upload, no LLM API keys, no external network calls.
 - **Vendor-neutral.** Works with OpenTelemetry going to Datadog, Grafana, Honeycomb, Dash0, Jaeger, or anything else.
-- **Quiet by default.** Only checks code units touched by the PR diff, updates a single PR comment in place, skips clean PRs silently, and supports inline `// telemetry-prs-ignore` directives.
+- **Quiet by default.** Only checks code units touched by the PR diff, skips trivial 1–3 line delegators and frontend `'use client'` files, updates a single PR comment in place with clickable file links, stays silent on clean PRs, and supports inline `// telemetry-prs-ignore` directives.
 
 ## Quickstart (GitHub Action)
 
@@ -28,21 +28,38 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: your-org/telemetry-prs@v0.1.0
+      - uses: telemetry-prs/telemetry-prs@v0.1.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 ```
 
-Works zero-config out of the box. To customize rules or match your team's tracing/logging wrappers, copy [`.telemetry-prs.example.yml`](./.telemetry-prs.example.yml) to `.telemetry-prs.yml` at the root of your repo.
+Works zero-config out of the box. Or generate a tailored `.telemetry-prs.yml` (auto-detecting `pino`, `winston`, `prom-client`, `@opentelemetry/api`, `dd-trace`, and source folders):
+
+```bash
+node dist/cli.cjs init --workflow
+```
+
+### Action Inputs & Outputs
+
+| Input | Default | Description |
+| :--- | :--- | :--- |
+| `config` | `.telemetry-prs.yml` | Path to configuration file |
+| `mode` | `comment` | `comment` (report only) or `fail` (exit non-zero on `error`-severity gaps) |
+| `github-token` | `${{ github.token }}` | Token for reading PR diffs and updating the PR comment |
+| `comment-on-pr` | `true` | Post/update a single summary comment on the PR |
+| `annotate` | `true` | Emit inline file/line annotations on changed lines |
+| `sarif-file` | `""` | Optional path to write SARIF 2.1.0 output for GitHub Code Scanning |
+
+Outputs: `findings-count`, `errors-count`, `warnings-count`, `coverage-percent`.
 
 ## Built-in Rules (v1)
 
 | Rule | Default Severity | What it checks |
 | :--- | :--- | :--- |
-| `http-handlers` | `warning` | Express, Fastify, Hono, Koa, NestJS, Next.js App Router, tRPC (`.query`/`.mutation`), AWS Lambda, Cloudflare Workers (`fetch`), and GraphQL (`Query`/`Mutation`) handlers missing a custom span or business metric |
-| `queue-consumers` | `error` | BullMQ `Worker`, Bull `queue.process`, KafkaJS `eachMessage`/`eachBatch`, RabbitMQ `channel.consume`, SQS consumers, AWS Lambda (`SQSEvent`/`EventBridge`/`Scheduled`), Cloudflare Workers (`queue`/`scheduled`), cron jobs, and `workers/` functions |
-| `error-swallowing` | `warning` | `catch` blocks that do not rethrow and emit no `recordException`, structured error log, or error metric |
-| `otel-naming` | `warning` | `startActiveSpan`/`startSpan` calls with high-cardinality template literals or string concatenation, empty names, or generic placeholders (`handler`, `fn`, `function`, `test`, `span`, `default`) |
+| `http-handlers` | `warning` | Express, Fastify, Hapi, Hono, Koa, NestJS, Next.js App Router, Next.js Pages API, Next.js `'use server'` actions, tRPC procedures, AWS Lambda HTTP handlers, Cloudflare Workers `fetch`, and GraphQL `Query`/`Mutation` resolvers missing a custom span or business metric |
+| `queue-consumers` | `error` | BullMQ `Worker`, Bull `queue.process`, Agenda `agenda.define`, KafkaJS `eachMessage`/`eachBatch`, RabbitMQ `channel.consume`, SQS consumers, cron jobs, Inngest, AWS Lambda queue/event handlers, Cloudflare Workers `queue`/`scheduled`, and `workers/` functions |
+| `error-swallowing` | `warning` | `catch` blocks that do not rethrow or forward errors (`next(e)`, `done(e)`, `emit('error', ...)`) and emit no `recordException`, structured error log, or error metric (benign parse/probe fallbacks like `JSON.parse` are skipped) |
+| `otel-naming` | `warning` | `startActiveSpan` / `startSpan` calls with high-cardinality dynamic names (`` `user-${id}` ``, `'order-' + id`) or empty/generic names (`'handler'`, `'fn'`, `'span'`) |
 
 ### Silencing deliberate exceptions
 
@@ -50,22 +67,18 @@ Works zero-config out of the box. To customize rules or match your team's tracin
 // telemetry-prs-ignore
 router.post('/internal/noop', async (req, res) => { ... });
 
-// Or ignore a single rule:
 // telemetry-prs-ignore: error-swallowing
 // telemetry-prs-ignore: otel-naming
 ```
 
 ## Local CLI
 
-Test Telemetry PRs against any local repository or diff:
-
 ```bash
-# Check current git diff against origin/main
+node dist/cli.cjs init --workflow
 node dist/cli.cjs check --base origin/main
-
-# Scan an entire directory (great for auditing an existing service)
 node dist/cli.cjs scan ./src
 node dist/cli.cjs scan ./examples --format markdown
+node dist/cli.cjs scan ./examples --format sarif
 ```
 
 ## Development

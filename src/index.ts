@@ -1,4 +1,6 @@
 import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import * as core from '@actions/core';
 import * as github from '@actions/github';
 import { analyzeDiffFiles } from './analyzer/index.ts';
@@ -9,6 +11,7 @@ import {
   type FormatPrCommentOptions,
   REPORT_MARKER,
 } from './reporter/markdown.ts';
+import { formatSarifReport } from './reporter/sarif.ts';
 import type { CheckMode, DiffFile } from './types.ts';
 
 async function getPrDiffFiles(
@@ -117,6 +120,7 @@ async function run(): Promise<void> {
     const token = core.getInput('github-token');
     const commentOnPr = core.getInput('comment-on-pr') !== 'false';
     const annotate = core.getInput('annotate') !== 'false';
+    const sarifFile = core.getInput('sarif-file');
 
     const config = loadConfig(cwd, configPath);
     if (modeOverride === 'comment' || modeOverride === 'fail') {
@@ -143,6 +147,13 @@ async function run(): Promise<void> {
     core.setOutput('findings-count', String(report.findings.length));
     core.setOutput('errors-count', String(report.errorsCount));
     core.setOutput('warnings-count', String(report.warningsCount));
+    core.setOutput('coverage-percent', String(report.coveragePercent));
+
+    if (sarifFile) {
+      const resolvedSarif = path.resolve(cwd, sarifFile);
+      fs.mkdirSync(path.dirname(resolvedSarif), { recursive: true });
+      fs.writeFileSync(resolvedSarif, formatSarifReport(report), 'utf8');
+    }
 
     if (annotate) {
       for (const f of report.findings) {

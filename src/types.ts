@@ -79,6 +79,8 @@ export interface Finding {
 export interface AnalysisReport {
   checkedFiles: number;
   checkedUnits: number;
+  passedUnits: number;
+  coveragePercent: number;
   findings: Finding[];
   errorsCount: number;
   warningsCount: number;

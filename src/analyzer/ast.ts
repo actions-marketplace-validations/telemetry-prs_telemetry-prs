@@ -109,17 +109,25 @@ function countEffectiveBodyLines(
   return Math.max(1, count);
 }
 
-function isUseClientModule(sourceFile: ts.SourceFile): boolean {
+function hasDirectivePrologue(
+  sourceFile: ts.SourceFile,
+  directive: string,
+): boolean {
   const first = sourceFile.statements[0];
-  if (
+  return Boolean(
     first &&
-    ts.isExpressionStatement(first) &&
-    ts.isStringLiteral(first.expression) &&
-    first.expression.text === 'use client'
-  ) {
-    return true;
-  }
-  return false;
+      ts.isExpressionStatement(first) &&
+      ts.isStringLiteral(first.expression) &&
+      first.expression.text === directive,
+  );
+}
+
+function isUseClientModule(sourceFile: ts.SourceFile): boolean {
+  return hasDirectivePrologue(sourceFile, 'use client');
+}
+
+function isUseServerModule(sourceFile: ts.SourceFile): boolean {
+  return hasDirectivePrologue(sourceFile, 'use server');
 }
 
 function getStringLiteralText(node: ts.Expression | undefined): string | null {
@@ -302,12 +310,24 @@ function findObjectPropertyFn(
   return null;
 }
 
-function hasExportModifier(node: ts.Node): boolean {
+function hasModifierKind(node: ts.Node, kind: ts.SyntaxKind): boolean {
   if (!ts.canHaveModifiers(node)) {
     return false;
   }
   const mods = ts.getModifiers(node);
-  return Boolean(mods?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword));
+  return Boolean(mods?.some((m) => m.kind === kind));
+}
+
+function hasExportModifier(node: ts.Node): boolean {
+  return hasModifierKind(node, ts.SyntaxKind.ExportKeyword);
+}
+
+function hasDefaultModifier(node: ts.Node): boolean {
+  return hasModifierKind(node, ts.SyntaxKind.DefaultKeyword);
+}
+
+function hasAsyncModifier(node: ts.Node): boolean {
+  return hasModifierKind(node, ts.SyntaxKind.AsyncKeyword);
 }
 
 function getDecorators(node: ts.Node): readonly ts.Decorator[] {
@@ -376,6 +396,8 @@ export function extractCodeUnits(
   const isWorkerFile =
     WORKER_DIR_RE.test(normalizedPath) && !HTTP_ROUTE_DIR_RE.test(normalizedPath);
   const isNextRouteFile = /(?:^|\/)route\.[jt]sx?$/i.test(normalizedPath);
+  const isNextPagesApiFile = /(?:^|\/)pages\/api\/.+\.[jt]s$/i.test(normalizedPath);
+  const isServerActionsFile = isUseServerModule(sourceFile);
   const isLambdaDir = LAMBDA_DIR_RE.test(normalizedPath);
   const isResolverFile = RESOLVER_FILE_RE.test(normalizedPath);
 
@@ -479,26 +501,50 @@ export function extractCodeUnits(
         const handlerProp = findObjectPropertyFn(sourceFile, obj, ['handler']);
         if (handlerProp && handlerProp.node.body) {
           let url = '';
+          let routePath = '';
           let method = 'ROUTE';
           for (const prop of obj.properties) {
             if (ts.isPropertyAssignment(prop)) {
               const name = prop.name.getText(sourceFile).replace(/^['"]|['"]$/g, '');
               const val = getStringLiteralText(prop.initializer);
               if (name === 'url' && val) url = val;
+              if (name === 'path' && val) routePath = val;
               if (name === 'method' && val) method = val.toUpperCase();
             }
           }
+          const isHapi = Boolean(routePath && !url);
+          const routeLabel = url || routePath || (isHapi ? '(hapi route)' : '(fastify route)');
           registerUnit(
             handlerProp.node,
             [handlerProp.node, node, findEnclosingStatement(node)],
             {
               ruleId: 'http-handlers',
               kind: 'http-handler',
-              symbolName: `${method} ${url || '(fastify route)'}`.trim(),
-              framework: 'fastify',
+              symbolName: `${method} ${routeLabel}`.trim(),
+              framework: isHapi ? 'hapi' : 'fastify',
             },
             handlerProp.node.body,
             handlerProp.wrapperCalleeText,
+          );
+        }
+      }
+
+      if (methodName === 'define' && args.length >= 2) {
+        const jobName = getStringLiteralText(args[0]);
+        const lastArg = args[args.length - 1];
+        const unwrapped = lastArg ? unwrapFunctionArg(sourceFile, lastArg) : null;
+        if (jobName && unwrapped) {
+          registerUnit(
+            unwrapped.fn,
+            [unwrapped.fn, node, findEnclosingStatement(node)],
+            {
+              ruleId: 'queue-consumers',
+              kind: 'queue-consumer',
+              symbolName: `agenda.define(${jobName})`,
+              framework: 'agenda',
+            },
+            unwrapped.fn.body,
+            unwrapped.wrapperCalleeText,
           );
         }
       }
@@ -699,9 +745,21 @@ export function extractCodeUnits(
       }
     }
 
-    if (ts.isFunctionDeclaration(node) && node.name && node.body) {
-      const fnName = node.name.text;
-      if (hasExportModifier(node) && NEXTJS_HTTP_METHODS.has(fnName) && isNextRouteFile) {
+    if (ts.isFunctionDeclaration(node) && node.body) {
+      const fnName = node.name?.text ?? 'default';
+      if (hasExportModifier(node) && hasDefaultModifier(node) && isNextPagesApiFile) {
+        registerUnit(
+          node,
+          [node],
+          {
+            ruleId: 'http-handlers',
+            kind: 'http-handler',
+            symbolName: `API ${normalizedPath}`,
+            framework: 'nextjs-pages',
+          },
+          node.body,
+        );
+      } else if (hasExportModifier(node) && NEXTJS_HTTP_METHODS.has(fnName) && isNextRouteFile) {
         registerUnit(
           node,
           [node],
@@ -710,6 +768,18 @@ export function extractCodeUnits(
             kind: 'http-handler',
             symbolName: `${fnName} ${normalizedPath}`,
             framework: 'nextjs',
+          },
+          node.body,
+        );
+      } else if (hasExportModifier(node) && isServerActionsFile && hasAsyncModifier(node)) {
+        registerUnit(
+          node,
+          [node],
+          {
+            ruleId: 'http-handlers',
+            kind: 'http-handler',
+            symbolName: `action ${fnName}`,
+            framework: 'nextjs-server-action',
           },
           node.body,
         );
@@ -787,6 +857,19 @@ export function extractCodeUnits(
             unwrapped.fn.body,
             unwrapped.wrapperCalleeText,
           );
+        } else if (isServerActionsFile && hasAsyncModifier(unwrapped.fn)) {
+          registerUnit(
+            unwrapped.fn,
+            [unwrapped.fn, decl, node],
+            {
+              ruleId: 'http-handlers',
+              kind: 'http-handler',
+              symbolName: `action ${varName}`,
+              framework: 'nextjs-server-action',
+            },
+            unwrapped.fn.body,
+            unwrapped.wrapperCalleeText,
+          );
         } else if (varName === 'handler') {
           const lambdaClass = classifyLambdaHandler(
             sourceFile,
@@ -840,6 +923,23 @@ export function extractCodeUnits(
 
     if (ts.isExportAssignment(node) && !node.isExportEquals) {
       const exported = unwrapExpression(node.expression);
+      if (isNextPagesApiFile) {
+        const unwrapped = unwrapFunctionArg(sourceFile, node.expression);
+        if (unwrapped) {
+          registerUnit(
+            unwrapped.fn,
+            [unwrapped.fn, node],
+            {
+              ruleId: 'http-handlers',
+              kind: 'http-handler',
+              symbolName: `API ${normalizedPath}`,
+              framework: 'nextjs-pages',
+            },
+            unwrapped.fn.body,
+            unwrapped.wrapperCalleeText,
+          );
+        }
+      }
       if (ts.isObjectLiteralExpression(exported)) {
         for (const prop of exported.properties) {
           const propName = prop.name

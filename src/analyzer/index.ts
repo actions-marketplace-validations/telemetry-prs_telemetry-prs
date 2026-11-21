@@ -154,8 +154,6 @@ export function analyzeTargets(
         continue;
       }
 
-      checkedUnits += 1;
-
       if (unit.kind === 'span-name') {
         if (unit.spanNameIssue) {
           findings.push({
@@ -177,6 +175,8 @@ export function analyzeTargets(
         }
         continue;
       }
+
+      checkedUnits += 1;
 
       const { passed, missing } = evaluateSignals(unit.foundSignals, rule);
       if (!passed) {
@@ -209,10 +209,16 @@ export function analyzeTargets(
 
   const errorsCount = findings.filter((f) => f.severity === 'error').length;
   const warningsCount = findings.filter((f) => f.severity === 'warning').length;
+  const coverageGapCount = findings.filter((f) => f.kind !== 'span-name').length;
+  const passedUnits = Math.max(0, checkedUnits - coverageGapCount);
+  const coveragePercent =
+    checkedUnits === 0 ? 100 : Math.round((passedUnits / checkedUnits) * 100);
 
   return {
     checkedFiles,
     checkedUnits,
+    passedUnits,
+    coveragePercent,
     findings,
     errorsCount,
     warningsCount,

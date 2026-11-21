@@ -40,7 +40,7 @@ export function formatPrComment(
     lines.push('### ✅ Telemetry PRs — No instrumentation gaps detected');
     lines.push('');
     lines.push(
-      `Checked **${report.checkedUnits}** touched handler(s)/worker(s)/catch block(s)/span(s) across **${report.checkedFiles}** file(s).`,
+      `Telemetry coverage: **${report.coveragePercent}%** (${report.passedUnits}/${report.checkedUnits} touched units passed across **${report.checkedFiles}** file(s)).`,
     );
     return lines.join('\n');
   }
@@ -54,6 +54,10 @@ export function formatPrComment(
   }
 
   lines.push(`### 🔭 Telemetry PRs — ${parts.join(', ')} in touched code`);
+  lines.push('');
+  lines.push(
+    `Telemetry coverage on touched code: **${report.coveragePercent}%** (${report.passedUnits}/${report.checkedUnits} passed across ${report.checkedFiles} file(s)).`,
+  );
   lines.push('');
   lines.push('| Severity | Location | Rule | Finding |');
   lines.push('| :--- | :--- | :--- | :--- |');
@@ -87,11 +91,11 @@ export function formatPrComment(
 
 export function formatTerminalReport(report: AnalysisReport): string {
   if (report.findings.length === 0) {
-    return `Telemetry PRs: OK — checked ${report.checkedUnits} unit(s) across ${report.checkedFiles} file(s), 0 gaps found.`;
+    return `Telemetry PRs: OK (${report.coveragePercent}% coverage — ${report.passedUnits}/${report.checkedUnits} units passed across ${report.checkedFiles} file(s), 0 gaps found).`;
   }
 
   const lines: string[] = [
-    `Telemetry PRs: found ${report.findings.length} gap(s) (${report.errorsCount} error(s), ${report.warningsCount} warning(s)) across ${report.checkedFiles} file(s):`,
+    `Telemetry PRs: ${report.coveragePercent}% coverage (${report.passedUnits}/${report.checkedUnits} passed) — found ${report.findings.length} gap(s) (${report.errorsCount} error(s), ${report.warningsCount} warning(s)) across ${report.checkedFiles} file(s):`,
     '',
   ];
 
