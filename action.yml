@@ -1,0 +1,40 @@
+name: 'Telemetry PRs'
+description: 'Catch missing OpenTelemetry spans, metrics, and logs in TypeScript/Node.js pull requests — fast, static, and 100% in your CI.'
+author: 'Telemetry PRs'
+branding:
+  icon: 'activity'
+  color: 'blue'
+
+inputs:
+  config:
+    description: 'Path to the .telemetry-prs.yml configuration file'
+    required: false
+    default: '.telemetry-prs.yml'
+  mode:
+    description: 'Override check mode: "comment" (never fail CI) or "fail" (fail CI on error-severity gaps)'
+    required: false
+    default: ''
+  github-token:
+    description: 'GitHub token with pull-requests: write permission to post/update PR comments'
+    required: false
+    default: ${{ github.token }}
+  comment-on-pr:
+    description: 'Post or update a single summary comment on the pull request'
+    required: false
+    default: 'true'
+  annotate:
+    description: 'Emit inline GitHub Actions warning/error annotations on changed lines'
+    required: false
+    default: 'true'
+
+outputs:
+  findings-count:
+    description: 'Total number of telemetry gaps found in the PR diff'
+  errors-count:
+    description: 'Number of error-severity telemetry gaps'
+  warnings-count:
+    description: 'Number of warning-severity telemetry gaps'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.cjs'

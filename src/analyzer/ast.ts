@@ -1,0 +1,1023 @@
+import path from 'node:path';
+import ts from 'typescript';
+import type { CodeUnit, SpanNameIssue, TelemetryPatterns } from '../types.ts';
+import {
+  blockRethrows,
+  detectSignals,
+  hasIgnoreDirective,
+  isBenignProbeTryCatch,
+} from './signals.ts';
+
+const HTTP_METHODS = new Set([
+  'get',
+  'post',
+  'put',
+  'patch',
+  'delete',
+  'options',
+  'head',
+  'all',
+]);
+
+const NEXTJS_HTTP_METHODS = new Set([
+  'GET',
+  'POST',
+  'PUT',
+  'PATCH',
+  'DELETE',
+  'HEAD',
+  'OPTIONS',
+]);
+
+const NEST_HTTP_DECORATORS = new Set([
+  'Get',
+  'Post',
+  'Put',
+  'Patch',
+  'Delete',
+  'All',
+  'Options',
+  'Head',
+]);
+
+const WORKER_DIR_RE = /(?:^|\/)(workers?|jobs?|consumers?|queues?)\//i;
+const HTTP_ROUTE_DIR_RE = /(?:^|\/)(api|routes?|controllers?)\//i;
+const WORKER_NAME_RE = /^(process|consume|handle)[A-Z]\w*(Job|Message|Event|Task|Queue)$/;
+
+const LAMBDA_DIR_RE = /(?:^|\/)(functions?|lambdas?|handlers?|api)\//i;
+const LAMBDA_TYPE_RE = /(Event|APIGateway|SQS|EventBridge|Scheduled)/;
+const LAMBDA_QUEUE_TYPE_RE = /(SQSEvent|SQSHandler|EventBridge|Scheduled)/i;
+const RESOLVER_FILE_RE = /resolver/i;
+
+const OTEL_SPAN_METHODS = new Set(['startActiveSpan', 'startSpan']);
+const GENERIC_SPAN_NAMES = new Set([
+  'handler',
+  'fn',
+  'function',
+  'test',
+  'span',
+  'default',
+]);
+
+function getScriptKind(filePath: string): ts.ScriptKind {
+  const ext = path.extname(filePath).toLowerCase();
+  switch (ext) {
+    case '.tsx':
+      return ts.ScriptKind.TSX;
+    case '.jsx':
+      return ts.ScriptKind.JSX;
+    case '.js':
+    case '.mjs':
+    case '.cjs':
+      return ts.ScriptKind.JS;
+    default:
+      return ts.ScriptKind.TS;
+  }
+}
+
+function getLineRange(
+  sourceFile: ts.SourceFile,
+  node: ts.Node,
+): { startLine: number; endLine: number; lineCount: number } {
+  const start = sourceFile.getLineAndCharacterOfPosition(
+    node.getStart(sourceFile),
+  );
+  const end = sourceFile.getLineAndCharacterOfPosition(node.getEnd());
+  const startLine = start.line + 1;
+  const endLine = end.line + 1;
+  return {
+    startLine,
+    endLine,
+    lineCount: Math.max(1, endLine - startLine + 1),
+  };
+}
+
+function countEffectiveBodyLines(
+  sourceFile: ts.SourceFile,
+  bodyNode: ts.Node,
+): number {
+  const rawText = bodyNode.getText(sourceFile);
+  const withoutBlockComments = rawText.replace(/\/\*[\s\S]*?\*\//g, '');
+  let count = 0;
+  for (const line of withoutBlockComments.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0 || trimmed.startsWith('//')) {
+      continue;
+    }
+    count += 1;
+  }
+  return Math.max(1, count);
+}
+
+function isUseClientModule(sourceFile: ts.SourceFile): boolean {
+  const first = sourceFile.statements[0];
+  if (
+    first &&
+    ts.isExpressionStatement(first) &&
+    ts.isStringLiteral(first.expression) &&
+    first.expression.text === 'use client'
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function getStringLiteralText(node: ts.Expression | undefined): string | null {
+  if (!node) {
+    return null;
+  }
+  if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+    return node.text;
+  }
+  return null;
+}
+
+function unwrapExpression(expr: ts.Expression): ts.Expression {
+  let curr = expr;
+  while (
+    ts.isParenthesizedExpression(curr) ||
+    ts.isAsExpression(curr) ||
+    ts.isSatisfiesExpression(curr)
+  ) {
+    curr = curr.expression;
+  }
+  return curr;
+}
+
+interface UnwrappedFunction {
+  fn: ts.ArrowFunction | ts.FunctionExpression;
+  wrapperCalleeText?: string;
+}
+
+function unwrapFunctionArg(
+  sourceFile: ts.SourceFile,
+  rawExpr: ts.Expression,
+): UnwrappedFunction | null {
+  const expr = unwrapExpression(rawExpr);
+  if (ts.isArrowFunction(expr) || ts.isFunctionExpression(expr)) {
+    return { fn: expr };
+  }
+  if (ts.isCallExpression(expr) && expr.arguments.length > 0) {
+    const wrapperCalleeText = `${expr.expression.getText(sourceFile)}(`;
+    for (let i = expr.arguments.length - 1; i >= 0; i -= 1) {
+      const arg = expr.arguments[i];
+      if (!arg) {
+        continue;
+      }
+      const inner = unwrapExpression(arg);
+      if (ts.isArrowFunction(inner) || ts.isFunctionExpression(inner)) {
+        return { fn: inner, wrapperCalleeText };
+      }
+    }
+  }
+  return null;
+}
+
+function findEnclosingStatement(node: ts.Node): ts.Node {
+  let curr: ts.Node = node;
+  while (curr.parent && !ts.isSourceFile(curr.parent)) {
+    if (
+      ts.isExpressionStatement(curr) ||
+      ts.isVariableStatement(curr) ||
+      ts.isReturnStatement(curr) ||
+      ts.isExportAssignment(curr) ||
+      ts.isFunctionDeclaration(curr) ||
+      ts.isMethodDeclaration(curr) ||
+      ts.isTryStatement(curr)
+    ) {
+      return curr;
+    }
+    curr = curr.parent;
+  }
+  return node;
+}
+
+function classifyLambdaHandler(
+  sourceFile: ts.SourceFile,
+  fn: ts.FunctionLikeDeclaration,
+  typeNode: ts.TypeNode | undefined,
+  isLambdaDir: boolean,
+): { ruleId: 'http-handlers' | 'queue-consumers'; kind: 'http-handler' | 'queue-consumer' } | null {
+  const paramTypes = fn.parameters
+    .map((p) => (p.type ? p.type.getText(sourceFile) : ''))
+    .join(' ');
+  const declType = typeNode ? typeNode.getText(sourceFile) : '';
+  const combinedTypes = `${paramTypes} ${declType}`.trim();
+
+  if (!isLambdaDir && !LAMBDA_TYPE_RE.test(combinedTypes)) {
+    return null;
+  }
+
+  if (LAMBDA_QUEUE_TYPE_RE.test(combinedTypes)) {
+    return { ruleId: 'queue-consumers', kind: 'queue-consumer' };
+  }
+  return { ruleId: 'http-handlers', kind: 'http-handler' };
+}
+
+function evaluateStaticStringExpr(rawExpr: ts.Expression): string | null {
+  const expr = unwrapExpression(rawExpr);
+  if (ts.isStringLiteral(expr) || ts.isNoSubstitutionTemplateLiteral(expr)) {
+    return expr.text;
+  }
+  if (
+    ts.isBinaryExpression(expr) &&
+    expr.operatorToken.kind === ts.SyntaxKind.PlusToken
+  ) {
+    const left = evaluateStaticStringExpr(expr.left);
+    const right = evaluateStaticStringExpr(expr.right);
+    if (left !== null && right !== null) {
+      return left + right;
+    }
+  }
+  return null;
+}
+
+function classifySpanName(
+  sourceFile: ts.SourceFile,
+  rawArg: ts.Expression,
+): { issue?: SpanNameIssue; raw: string } {
+  const arg = unwrapExpression(rawArg);
+  const raw = arg.getText(sourceFile);
+
+  if (ts.isTemplateExpression(arg)) {
+    return { issue: 'high-cardinality', raw };
+  }
+
+  if (
+    ts.isBinaryExpression(arg) &&
+    arg.operatorToken.kind === ts.SyntaxKind.PlusToken
+  ) {
+    const staticVal = evaluateStaticStringExpr(arg);
+    if (staticVal === null) {
+      return { issue: 'high-cardinality', raw };
+    }
+    const trimmed = staticVal.trim();
+    if (trimmed.length === 0) {
+      return { issue: 'empty-name', raw };
+    }
+    if (GENERIC_SPAN_NAMES.has(trimmed.toLowerCase())) {
+      return { issue: 'generic-name', raw };
+    }
+    return { raw };
+  }
+
+  const staticText = evaluateStaticStringExpr(arg);
+  if (staticText !== null) {
+    const trimmed = staticText.trim();
+    if (trimmed.length === 0) {
+      return { issue: 'empty-name', raw };
+    }
+    if (GENERIC_SPAN_NAMES.has(trimmed.toLowerCase())) {
+      return { issue: 'generic-name', raw };
+    }
+  }
+
+  return { raw };
+}
+
+function findObjectPropertyFn(
+  sourceFile: ts.SourceFile,
+  obj: ts.ObjectLiteralExpression,
+  propNames: string[],
+): { name: string; node: ts.FunctionLikeDeclaration; wrapperCalleeText?: string } | null {
+  for (const prop of obj.properties) {
+    const propName = prop.name?.getText(sourceFile).replace(/^['"]|['"]$/g, '');
+    if (!propName || !propNames.includes(propName)) {
+      continue;
+    }
+    if (ts.isMethodDeclaration(prop)) {
+      return { name: propName, node: prop };
+    }
+    if (ts.isPropertyAssignment(prop)) {
+      const unwrapped = unwrapFunctionArg(sourceFile, prop.initializer);
+      if (unwrapped) {
+        return {
+          name: propName,
+          node: unwrapped.fn,
+          wrapperCalleeText: unwrapped.wrapperCalleeText,
+        };
+      }
+    }
+  }
+  return null;
+}
+
+function hasExportModifier(node: ts.Node): boolean {
+  if (!ts.canHaveModifiers(node)) {
+    return false;
+  }
+  const mods = ts.getModifiers(node);
+  return Boolean(mods?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword));
+}
+
+function getDecorators(node: ts.Node): readonly ts.Decorator[] {
+  if (!ts.canHaveDecorators(node)) {
+    return [];
+  }
+  return ts.getDecorators(node) ?? [];
+}
+
+export function extractCodeUnits(
+  filePath: string,
+  sourceText: string,
+  patterns: TelemetryPatterns,
+): CodeUnit[] {
+  const normalizedPath = filePath.replace(/\\/g, '/');
+  const sourceFile = ts.createSourceFile(
+    normalizedPath,
+    sourceText,
+    ts.ScriptTarget.Latest,
+    true,
+    getScriptKind(normalizedPath),
+  );
+
+  if (isUseClientModule(sourceFile)) {
+    return [];
+  }
+
+  const units: CodeUnit[] = [];
+  const seenNodes = new Set<ts.Node>();
+
+  const registerUnit = (
+    unitNode: ts.Node,
+    anchorNodes: ts.Node[],
+    meta: Omit<
+      CodeUnit,
+      'startLine' | 'endLine' | 'lineCount' | 'ignored' | 'foundSignals'
+    >,
+    bodyNode: ts.Node,
+    wrapperCalleeText?: string,
+  ): void => {
+    if (seenNodes.has(unitNode)) {
+      return;
+    }
+    seenNodes.add(unitNode);
+
+    const { startLine, endLine } = getLineRange(sourceFile, unitNode);
+    const lineCount = countEffectiveBodyLines(sourceFile, bodyNode);
+    const ignored = hasIgnoreDirective(sourceFile, anchorNodes, meta.ruleId);
+    const foundSignals = detectSignals(
+      sourceFile,
+      bodyNode,
+      patterns,
+      wrapperCalleeText,
+    );
+
+    units.push({
+      ...meta,
+      startLine,
+      endLine,
+      lineCount,
+      ignored,
+      foundSignals,
+    });
+  };
+
+  const isWorkerFile =
+    WORKER_DIR_RE.test(normalizedPath) && !HTTP_ROUTE_DIR_RE.test(normalizedPath);
+  const isNextRouteFile = /(?:^|\/)route\.[jt]sx?$/i.test(normalizedPath);
+  const isLambdaDir = LAMBDA_DIR_RE.test(normalizedPath);
+  const isResolverFile = RESOLVER_FILE_RE.test(normalizedPath);
+
+  const registerGraphqlObjectResolvers = (
+    parentType: 'Query' | 'Mutation',
+    obj: ts.ObjectLiteralExpression,
+    ownerAnchors: ts.Node[],
+  ): void => {
+    for (const prop of obj.properties) {
+      const fieldName = prop.name?.getText(sourceFile).replace(/^['"]|['"]$/g, '');
+      if (!fieldName) {
+        continue;
+      }
+
+      if (ts.isMethodDeclaration(prop) && prop.body) {
+        registerUnit(
+          prop,
+          [prop, ...ownerAnchors],
+          {
+            ruleId: 'http-handlers',
+            kind: 'http-handler',
+            symbolName: `${parentType}.${fieldName}`,
+            framework: 'graphql',
+          },
+          prop.body,
+        );
+      } else if (ts.isPropertyAssignment(prop)) {
+        const unwrapped = unwrapFunctionArg(sourceFile, prop.initializer);
+        if (unwrapped) {
+          registerUnit(
+            unwrapped.fn,
+            [unwrapped.fn, prop, ...ownerAnchors],
+            {
+              ruleId: 'http-handlers',
+              kind: 'http-handler',
+              symbolName: `${parentType}.${fieldName}`,
+              framework: 'graphql',
+            },
+            unwrapped.fn.body,
+            unwrapped.wrapperCalleeText,
+          );
+          continue;
+        }
+
+        const initExpr = unwrapExpression(prop.initializer);
+        if (ts.isObjectLiteralExpression(initExpr)) {
+          const resolveProp = findObjectPropertyFn(sourceFile, initExpr, [
+            'resolve',
+          ]);
+          if (resolveProp && resolveProp.node.body) {
+            registerUnit(
+              resolveProp.node,
+              [resolveProp.node, prop, ...ownerAnchors],
+              {
+                ruleId: 'http-handlers',
+                kind: 'http-handler',
+                symbolName: `${parentType}.${fieldName}`,
+                framework: 'graphql',
+              },
+              resolveProp.node.body,
+              resolveProp.wrapperCalleeText,
+            );
+          }
+        }
+      }
+    }
+  };
+
+  const visit = (node: ts.Node): void => {
+
+    if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression)) {
+      const methodName = node.expression.name.text;
+      const receiverText = node.expression.expression.getText(sourceFile);
+      const args = node.arguments;
+
+      if (HTTP_METHODS.has(methodName) && args.length >= 2) {
+        const firstArg = args[0];
+        const routeLiteral = getStringLiteralText(firstArg);
+        const lastArg = args[args.length - 1];
+        const unwrapped = lastArg ? unwrapFunctionArg(sourceFile, lastArg) : null;
+
+        if (unwrapped && (routeLiteral !== null || ts.isRegularExpressionLiteral(firstArg!))) {
+          const routeLabel = routeLiteral ?? firstArg!.getText(sourceFile);
+          registerUnit(
+            unwrapped.fn,
+            [unwrapped.fn, node, findEnclosingStatement(node)],
+            {
+              ruleId: 'http-handlers',
+              kind: 'http-handler',
+              symbolName: `${methodName.toUpperCase()} ${routeLabel}`,
+              framework: 'http-router',
+            },
+            unwrapped.fn.body,
+            unwrapped.wrapperCalleeText,
+          );
+        }
+      }
+
+      if (methodName === 'route' && args.length === 1 && ts.isObjectLiteralExpression(args[0]!)) {
+        const obj = args[0]!;
+        const handlerProp = findObjectPropertyFn(sourceFile, obj, ['handler']);
+        if (handlerProp && handlerProp.node.body) {
+          let url = '';
+          let method = 'ROUTE';
+          for (const prop of obj.properties) {
+            if (ts.isPropertyAssignment(prop)) {
+              const name = prop.name.getText(sourceFile).replace(/^['"]|['"]$/g, '');
+              const val = getStringLiteralText(prop.initializer);
+              if (name === 'url' && val) url = val;
+              if (name === 'method' && val) method = val.toUpperCase();
+            }
+          }
+          registerUnit(
+            handlerProp.node,
+            [handlerProp.node, node, findEnclosingStatement(node)],
+            {
+              ruleId: 'http-handlers',
+              kind: 'http-handler',
+              symbolName: `${method} ${url || '(fastify route)'}`.trim(),
+              framework: 'fastify',
+            },
+            handlerProp.node.body,
+            handlerProp.wrapperCalleeText,
+          );
+        }
+      }
+
+      if (methodName === 'process' && args.length >= 1) {
+        const lastArg = args[args.length - 1];
+        const unwrapped = lastArg ? unwrapFunctionArg(sourceFile, lastArg) : null;
+        if (unwrapped) {
+          const jobName = getStringLiteralText(args[0]) ?? receiverText;
+          registerUnit(
+            unwrapped.fn,
+            [unwrapped.fn, node, findEnclosingStatement(node)],
+            {
+              ruleId: 'queue-consumers',
+              kind: 'queue-consumer',
+              symbolName: `queue.process(${jobName})`,
+              framework: 'bull',
+            },
+            unwrapped.fn.body,
+            unwrapped.wrapperCalleeText,
+          );
+        }
+      }
+
+      if (methodName === 'consume' && args.length >= 2) {
+        const unwrapped = unwrapFunctionArg(sourceFile, args[1]!);
+        if (unwrapped) {
+          const queueName = getStringLiteralText(args[0]) ?? 'queue';
+          registerUnit(
+            unwrapped.fn,
+            [unwrapped.fn, node, findEnclosingStatement(node)],
+            {
+              ruleId: 'queue-consumers',
+              kind: 'queue-consumer',
+              symbolName: `consume(${queueName})`,
+              framework: 'amqp',
+            },
+            unwrapped.fn.body,
+            unwrapped.wrapperCalleeText,
+          );
+        }
+      }
+
+      if (methodName === 'run' && args.length === 1 && ts.isObjectLiteralExpression(args[0]!)) {
+        const handlerProp = findObjectPropertyFn(sourceFile, args[0]!, [
+          'eachMessage',
+          'eachBatch',
+        ]);
+        if (handlerProp && handlerProp.node.body) {
+          registerUnit(
+            handlerProp.node,
+            [handlerProp.node, node, findEnclosingStatement(node)],
+            {
+              ruleId: 'queue-consumers',
+              kind: 'queue-consumer',
+              symbolName: `kafka.${handlerProp.name}`,
+              framework: 'kafkajs',
+            },
+            handlerProp.node.body,
+            handlerProp.wrapperCalleeText,
+          );
+        }
+      }
+
+      if (methodName === 'schedule' && args.length >= 2) {
+        const unwrapped = unwrapFunctionArg(sourceFile, args[1]!);
+        if (unwrapped) {
+          const expr = getStringLiteralText(args[0]) ?? 'cron';
+          registerUnit(
+            unwrapped.fn,
+            [unwrapped.fn, node, findEnclosingStatement(node)],
+            {
+              ruleId: 'queue-consumers',
+              kind: 'queue-consumer',
+              symbolName: `cron.schedule(${expr})`,
+              framework: 'node-cron',
+            },
+            unwrapped.fn.body,
+            unwrapped.wrapperCalleeText,
+          );
+        }
+      }
+
+      if (methodName === 'createFunction' && args.length >= 2) {
+        const lastArg = args[args.length - 1];
+        const unwrapped = lastArg ? unwrapFunctionArg(sourceFile, lastArg) : null;
+        if (unwrapped) {
+          registerUnit(
+            unwrapped.fn,
+            [unwrapped.fn, node, findEnclosingStatement(node)],
+            {
+              ruleId: 'queue-consumers',
+              kind: 'queue-consumer',
+              symbolName: `${receiverText}.createFunction`,
+              framework: 'inngest',
+            },
+            unwrapped.fn.body,
+            unwrapped.wrapperCalleeText,
+          );
+        }
+      }
+
+      if (methodName === 'create' && args.length === 1 && ts.isObjectLiteralExpression(args[0]!)) {
+        const handlerProp = findObjectPropertyFn(sourceFile, args[0]!, [
+          'handleMessage',
+          'handleMessageBatch',
+        ]);
+        if (handlerProp && handlerProp.node.body) {
+          registerUnit(
+            handlerProp.node,
+            [handlerProp.node, node, findEnclosingStatement(node)],
+            {
+              ruleId: 'queue-consumers',
+              kind: 'queue-consumer',
+              symbolName: `sqs.${handlerProp.name}`,
+              framework: 'sqs-consumer',
+            },
+            handlerProp.node.body,
+            handlerProp.wrapperCalleeText,
+          );
+        }
+      }
+
+      if ((methodName === 'query' || methodName === 'mutation') && args.length === 1) {
+        const unwrapped = unwrapFunctionArg(sourceFile, args[0]!);
+        if (unwrapped) {
+          let label = `trpc.${methodName}`;
+          const anchors: ts.Node[] = [unwrapped.fn, node];
+          if (ts.isPropertyAssignment(node.parent)) {
+            const propName = node.parent.name
+              .getText(sourceFile)
+              .replace(/^['"]|['"]$/g, '');
+            if (propName) {
+              label = `trpc.${methodName} ${propName}`;
+            }
+            anchors.push(node.parent);
+          } else if (
+            ts.isVariableDeclaration(node.parent) &&
+            ts.isIdentifier(node.parent.name)
+          ) {
+            label = `trpc.${methodName} ${node.parent.name.text}`;
+            anchors.push(node.parent);
+          }
+          anchors.push(findEnclosingStatement(node));
+
+          registerUnit(
+            unwrapped.fn,
+            anchors,
+            {
+              ruleId: 'http-handlers',
+              kind: 'http-handler',
+              symbolName: label,
+              framework: 'trpc',
+            },
+            unwrapped.fn.body,
+            unwrapped.wrapperCalleeText,
+          );
+        }
+      }
+    }
+
+    if (ts.isNewExpression(node) && node.arguments && node.arguments.length >= 2) {
+      const ctorName = node.expression.getText(sourceFile);
+      if (ctorName === 'Worker' || ctorName.endsWith('.Worker')) {
+        const unwrapped = unwrapFunctionArg(sourceFile, node.arguments[1]!);
+        if (unwrapped) {
+          const queueName = getStringLiteralText(node.arguments[0]) ?? 'worker';
+          registerUnit(
+            unwrapped.fn,
+            [unwrapped.fn, node, findEnclosingStatement(node)],
+            {
+              ruleId: 'queue-consumers',
+              kind: 'queue-consumer',
+              symbolName: `Worker(${queueName})`,
+              framework: 'bullmq',
+            },
+            unwrapped.fn.body,
+            unwrapped.wrapperCalleeText,
+          );
+        }
+      } else if (ctorName === 'CronJob' || ctorName.endsWith('.CronJob')) {
+        const unwrapped = unwrapFunctionArg(sourceFile, node.arguments[1]!);
+        if (unwrapped) {
+          const expr = getStringLiteralText(node.arguments[0]) ?? 'cron';
+          registerUnit(
+            unwrapped.fn,
+            [unwrapped.fn, node, findEnclosingStatement(node)],
+            {
+              ruleId: 'queue-consumers',
+              kind: 'queue-consumer',
+              symbolName: `CronJob(${expr})`,
+              framework: 'cron',
+            },
+            unwrapped.fn.body,
+            unwrapped.wrapperCalleeText,
+          );
+        }
+      }
+    }
+
+    if (ts.isFunctionDeclaration(node) && node.name && node.body) {
+      const fnName = node.name.text;
+      if (hasExportModifier(node) && NEXTJS_HTTP_METHODS.has(fnName) && isNextRouteFile) {
+        registerUnit(
+          node,
+          [node],
+          {
+            ruleId: 'http-handlers',
+            kind: 'http-handler',
+            symbolName: `${fnName} ${normalizedPath}`,
+            framework: 'nextjs',
+          },
+          node.body,
+        );
+      } else if (hasExportModifier(node) && fnName === 'handler') {
+        const lambdaClass = classifyLambdaHandler(
+          sourceFile,
+          node,
+          undefined,
+          isLambdaDir,
+        );
+        if (lambdaClass) {
+          registerUnit(
+            node,
+            [node],
+            {
+              ruleId: lambdaClass.ruleId,
+              kind: lambdaClass.kind,
+              symbolName: 'handler',
+              framework: 'aws-lambda',
+            },
+            node.body,
+          );
+        } else if (isWorkerFile) {
+          registerUnit(
+            node,
+            [node],
+            {
+              ruleId: 'queue-consumers',
+              kind: 'queue-consumer',
+              symbolName: fnName,
+              framework: 'worker-function',
+            },
+            node.body,
+          );
+        }
+      } else if (
+        hasExportModifier(node) &&
+        (isWorkerFile || WORKER_NAME_RE.test(fnName))
+      ) {
+        registerUnit(
+          node,
+          [node],
+          {
+            ruleId: 'queue-consumers',
+            kind: 'queue-consumer',
+            symbolName: fnName,
+            framework: 'worker-function',
+          },
+          node.body,
+        );
+      }
+    }
+
+    if (ts.isVariableStatement(node) && hasExportModifier(node)) {
+      for (const decl of node.declarationList.declarations) {
+        if (!ts.isIdentifier(decl.name) || !decl.initializer) {
+          continue;
+        }
+        const varName = decl.name.text;
+        const unwrapped = unwrapFunctionArg(sourceFile, decl.initializer);
+        if (!unwrapped) {
+          continue;
+        }
+
+        if (NEXTJS_HTTP_METHODS.has(varName) && isNextRouteFile) {
+          registerUnit(
+            unwrapped.fn,
+            [unwrapped.fn, decl, node],
+            {
+              ruleId: 'http-handlers',
+              kind: 'http-handler',
+              symbolName: `${varName} ${normalizedPath}`,
+              framework: 'nextjs',
+            },
+            unwrapped.fn.body,
+            unwrapped.wrapperCalleeText,
+          );
+        } else if (varName === 'handler') {
+          const lambdaClass = classifyLambdaHandler(
+            sourceFile,
+            unwrapped.fn,
+            decl.type,
+            isLambdaDir,
+          );
+          if (lambdaClass) {
+            registerUnit(
+              unwrapped.fn,
+              [unwrapped.fn, decl, node],
+              {
+                ruleId: lambdaClass.ruleId,
+                kind: lambdaClass.kind,
+                symbolName: 'handler',
+                framework: 'aws-lambda',
+              },
+              unwrapped.fn.body,
+              unwrapped.wrapperCalleeText,
+            );
+          } else if (isWorkerFile) {
+            registerUnit(
+              unwrapped.fn,
+              [unwrapped.fn, decl, node],
+              {
+                ruleId: 'queue-consumers',
+                kind: 'queue-consumer',
+                symbolName: varName,
+                framework: 'worker-function',
+              },
+              unwrapped.fn.body,
+              unwrapped.wrapperCalleeText,
+            );
+          }
+        } else if (isWorkerFile || WORKER_NAME_RE.test(varName)) {
+          registerUnit(
+            unwrapped.fn,
+            [unwrapped.fn, decl, node],
+            {
+              ruleId: 'queue-consumers',
+              kind: 'queue-consumer',
+              symbolName: varName,
+              framework: 'worker-function',
+            },
+            unwrapped.fn.body,
+            unwrapped.wrapperCalleeText,
+          );
+        }
+      }
+    }
+
+    if (ts.isExportAssignment(node) && !node.isExportEquals) {
+      const exported = unwrapExpression(node.expression);
+      if (ts.isObjectLiteralExpression(exported)) {
+        for (const prop of exported.properties) {
+          const propName = prop.name
+            ?.getText(sourceFile)
+            .replace(/^['"]|['"]$/g, '');
+          if (
+            propName !== 'fetch' &&
+            propName !== 'queue' &&
+            propName !== 'scheduled'
+          ) {
+            continue;
+          }
+
+          let fnNode: ts.FunctionLikeDeclaration | null = null;
+          let wrapperCalleeText: string | undefined;
+          if (ts.isMethodDeclaration(prop) && prop.body) {
+            fnNode = prop;
+          } else if (ts.isPropertyAssignment(prop)) {
+            const unwrapped = unwrapFunctionArg(sourceFile, prop.initializer);
+            if (unwrapped) {
+              fnNode = unwrapped.fn;
+              wrapperCalleeText = unwrapped.wrapperCalleeText;
+            }
+          }
+
+          if (fnNode && fnNode.body) {
+            const isHttp = propName === 'fetch';
+            registerUnit(
+              fnNode,
+              [fnNode, prop, node],
+              {
+                ruleId: isHttp ? 'http-handlers' : 'queue-consumers',
+                kind: isHttp ? 'http-handler' : 'queue-consumer',
+                symbolName: `cloudflare.${propName}`,
+                framework: 'cloudflare-workers',
+              },
+              fnNode.body,
+              wrapperCalleeText,
+            );
+          }
+        }
+      }
+    }
+
+    if (isResolverFile) {
+      if (ts.isPropertyAssignment(node)) {
+        const propName = node.name
+          .getText(sourceFile)
+          .replace(/^['"]|['"]$/g, '');
+        if (propName === 'Query' || propName === 'Mutation') {
+          const init = unwrapExpression(node.initializer);
+          if (ts.isObjectLiteralExpression(init)) {
+            registerGraphqlObjectResolvers(propName, init, [
+              node,
+              findEnclosingStatement(node),
+            ]);
+          }
+        }
+      } else if (
+        ts.isVariableDeclaration(node) &&
+        ts.isIdentifier(node.name) &&
+        (node.name.text === 'Query' || node.name.text === 'Mutation') &&
+        node.initializer
+      ) {
+        const init = unwrapExpression(node.initializer);
+        if (ts.isObjectLiteralExpression(init)) {
+          registerGraphqlObjectResolvers(node.name.text, init, [
+            node,
+            findEnclosingStatement(node),
+          ]);
+        }
+      }
+    }
+
+    if (ts.isMethodDeclaration(node) && node.body) {
+      const decorators = getDecorators(node);
+      for (const dec of decorators) {
+        const expr = dec.expression;
+        const decName = ts.isCallExpression(expr)
+          ? expr.expression.getText(sourceFile)
+          : expr.getText(sourceFile);
+        if (NEST_HTTP_DECORATORS.has(decName)) {
+          const methodLabel = node.name.getText(sourceFile);
+          registerUnit(
+            node,
+            [node],
+            {
+              ruleId: 'http-handlers',
+              kind: 'http-handler',
+              symbolName: `@${decName} ${methodLabel}`,
+              framework: 'nestjs',
+            },
+            node.body,
+          );
+          break;
+        }
+      }
+    }
+
+    if (ts.isCatchClause(node)) {
+      const catchVarName = node.variableDeclaration?.name.getText(sourceFile);
+      const parentTry = ts.isTryStatement(node.parent) ? node.parent : null;
+      const catchEffectiveLines = countEffectiveBodyLines(
+        sourceFile,
+        node.block,
+      );
+      const isBenignProbe =
+        parentTry !== null &&
+        isBenignProbeTryCatch(sourceFile, parentTry, catchEffectiveLines);
+      const rethrows =
+        isBenignProbe || blockRethrows(sourceFile, node.block, catchVarName);
+      const anchorNodes = parentTry ? [node, parentTry] : [node];
+      const { startLine, endLine } = getLineRange(sourceFile, node);
+      const ignored = hasIgnoreDirective(
+        sourceFile,
+        anchorNodes,
+        'error-swallowing',
+      );
+      const foundSignals = detectSignals(sourceFile, node.block, patterns);
+
+      units.push({
+        ruleId: 'error-swallowing',
+        kind: 'catch-block',
+        symbolName: `catch (${catchVarName ?? ''})`,
+        framework: 'typescript',
+        startLine,
+        endLine,
+        lineCount: catchEffectiveLines,
+        ignored,
+        foundSignals,
+        rethrows,
+      });
+    }
+
+    if (ts.isCallExpression(node) && node.arguments.length >= 1) {
+      const calleeName = ts.isPropertyAccessExpression(node.expression)
+        ? node.expression.name.text
+        : ts.isIdentifier(node.expression)
+          ? node.expression.text
+          : null;
+
+      if (calleeName && OTEL_SPAN_METHODS.has(calleeName)) {
+        const nameArg = node.arguments[0]!;
+        const { issue, raw } = classifySpanName(sourceFile, nameArg);
+        const startPos = sourceFile.getLineAndCharacterOfPosition(
+          node.getStart(sourceFile),
+        );
+        const endPos = sourceFile.getLineAndCharacterOfPosition(
+          nameArg.getEnd(),
+        );
+        const startLine = startPos.line + 1;
+        const endLine = endPos.line + 1;
+        const anchorNodes = [node, nameArg, findEnclosingStatement(node)];
+        const ignored = hasIgnoreDirective(
+          sourceFile,
+          anchorNodes,
+          'otel-naming',
+        );
+
+        units.push({
+          ruleId: 'otel-naming',
+          kind: 'span-name',
+          symbolName: `${calleeName}(${raw})`,
+          framework: 'opentelemetry',
+          startLine,
+          endLine,
+          lineCount: Math.max(1, endLine - startLine + 1),
+          ignored,
+          foundSignals: [],
+          spanNameIssue: issue,
+          spanNameRaw: raw,
+        });
+      }
+    }
+
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+  return units;
+}

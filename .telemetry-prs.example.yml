@@ -1,0 +1,87 @@
+version: 1
+
+mode: comment
+
+include:
+  - "src/**/*.{ts,js,mts,cts,mjs,cjs}"
+  - "app/**/*.{ts,js}"
+  - "pages/api/**/*.{ts,js}"
+  - "functions/**/*.{ts,js}"
+
+exclude:
+  - "**/*.test.*"
+  - "**/*.spec.*"
+  - "**/__tests__/**"
+  - "**/dist/**"
+  - "**/build/**"
+  - "**/node_modules/**"
+  - "**/.yarn/**"
+  - "**/*.min.*"
+  - "**/examples/**"
+  - "**/scripts/**"
+  - "**/website/**"
+
+telemetry:
+  spans:
+    - "startActiveSpan"
+    - "startSpan"
+    - "withSpan"
+    - "trace.getTracer"
+    - "span.setAttribute"
+    - "span.addEvent"
+    - "setAttributes"
+  spanErrors:
+    - "recordException"
+    - "setStatus"
+  metrics:
+    - ".add("
+    - ".record("
+    - ".inc("
+    - ".dec("
+    - ".observe("
+    - ".set("
+    - "createCounter"
+    - "createHistogram"
+    - "createUpDownCounter"
+    - "increment("
+  logs:
+    - "logger.info"
+    - "logger.warn"
+    - "logger.error"
+    - "logger.fatal"
+    - "log.info"
+    - "log.warn"
+    - "log.error"
+    - "log.fatal"
+    - "req.log."
+    - "request.log."
+
+rules:
+  http-handlers:
+    enabled: true
+    severity: warning
+    require: [span, metric]
+    matchMode: any
+    minLines: 4
+    description: "HTTP route handlers should emit a custom span or business metric"
+
+  queue-consumers:
+    enabled: true
+    severity: error
+    require: [span, metric]
+    matchMode: any
+    minLines: 3
+    description: "Background jobs and queue consumers run off-request and must be instrumented"
+
+  error-swallowing:
+    enabled: true
+    severity: warning
+    require: [span-error, log, metric]
+    matchMode: any
+    minLines: 1
+    description: "Catch blocks that do not rethrow should record an exception, log, or increment an error metric"
+
+  otel-naming:
+    enabled: true
+    severity: warning
+    description: "OpenTelemetry span names should be static, low-cardinality, and descriptive"
