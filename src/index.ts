@@ -43,13 +43,41 @@ async function getPrDiffFiles(
   return diffFiles;
 }
 
+function isGitHubPermissionError(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) {
+    return false;
+  }
+  const maybeStatus = (error as { status?: unknown }).status;
+  if (maybeStatus === 403) {
+    return true;
+  }
+  const message =
+    error instanceof Error ? error.message : String((error as { message?: unknown }).message ?? '');
+  return /resource not accessible by integration|forbidden/i.test(message);
+}
+
 function getLocalGitDiffFiles(cwd: string): DiffFile[] {
-  const diffOutput = execFileSync('git', ['diff', '-U0', 'HEAD~1...HEAD'], {
-    cwd,
-    encoding: 'utf8',
-    maxBuffer: 20 * 1024 * 1024,
-  });
-  return parseUnifiedDiff(diffOutput);
+  const attempts: string[][] = [
+    ['diff', '-U0', 'HEAD~1...HEAD'],
+    ['diff', '-U0', 'HEAD'],
+  ];
+  for (const args of attempts) {
+    try {
+      const diffOutput = execFileSync('git', args, {
+        cwd,
+        encoding: 'utf8',
+        maxBuffer: 20 * 1024 * 1024,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      return parseUnifiedDiff(diffOutput);
+    } catch {
+      continue;
+    }
+  }
+  core.warning(
+    'Unable to read local git diff (shallow clone or single commit). Pass github-token on pull_request events or set fetch-depth: 2.',
+  );
+  return [];
 }
 
 async function upsertPrComment(
@@ -177,14 +205,24 @@ async function run(): Promise<void> {
 
     if (pr && token && commentOnPr) {
       const octokit = github.getOctokit(token);
-      await upsertPrComment(
-        octokit,
-        github.context.repo.owner,
-        github.context.repo.repo,
-        pr.number,
-        markdown,
-        report.findings.length > 0,
-      );
+      try {
+        await upsertPrComment(
+          octokit,
+          github.context.repo.owner,
+          github.context.repo.repo,
+          pr.number,
+          markdown,
+          report.findings.length > 0,
+        );
+      } catch (commentError) {
+        if (isGitHubPermissionError(commentError)) {
+          core.warning(
+            'Skipped PR comment because GITHUB_TOKEN lacks pull-requests: write permission (common on fork PRs). Results were still written to the Job Summary and annotations.',
+          );
+        } else {
+          throw commentError;
+        }
+      }
     }
 
     if (config.mode === 'fail' && report.errorsCount > 0) {

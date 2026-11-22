@@ -7,20 +7,30 @@ const NON_METRIC_RECEIVER_RE =
   /(?:^|[.\s])(queue|queues|set|map|headers|cookies|session|cache|searchparams|params|res|reply|response|req|request|formdata|classlist|list|items|errors|tags|flags|store|db|redis|client|socket|router|app)$/i;
 
 const NON_METRIC_SUFFIX_RE =
-  /(queue|queues|set|map|headers|cookies|session|cache|list|params)$/i;
+  /(queue|queues|set|map|headers|cookies|session|cache|list|params|store|storage|jar|bucket|state|registry|options|config|ctx|context)$/i;
 
 const AMBIGUOUS_METRIC_METHODS = new Set(['.add(', '.set(']);
 
-const ERROR_FORWARD_CALLEES = new Set([
+const BARE_ERROR_FORWARD_CALLEES = new Set([
   'next',
   'done',
   'cb',
   'callback',
   'reject',
+]);
+
+const METHOD_ERROR_FORWARD_CALLEES = new Set([
   'errorhandler',
   'handleerror',
   'onerror',
+  'onwarning',
+  'captureexception',
+  'capturemessage',
+  'notify',
 ]);
+
+const ERROR_REPORTER_CALLBACK_RE =
+  /\b(on\w*error|errorhandler|handleerror|reporterror)\b/i;
 
 const BENIGN_PROBE_PATTERNS = [
   'JSON.parse(',
@@ -195,13 +205,17 @@ export function blockRethrows(
     }
     if (ts.isCallExpression(node) && node.arguments.length >= 1) {
       const callee = node.expression;
-      const calleeName = ts.isIdentifier(callee)
+      const isBareIdentifier = ts.isIdentifier(callee);
+      const calleeName = isBareIdentifier
         ? callee.text.toLowerCase()
         : ts.isPropertyAccessExpression(callee)
           ? callee.name.text.toLowerCase()
           : '';
 
-      if (ERROR_FORWARD_CALLEES.has(calleeName)) {
+      if (
+        (isBareIdentifier && BARE_ERROR_FORWARD_CALLEES.has(calleeName)) ||
+        METHOD_ERROR_FORWARD_CALLEES.has(calleeName)
+      ) {
         handled = true;
         return;
       }
@@ -249,4 +263,19 @@ export function isBenignProbeTryCatch(
   }
   const tryText = tryStmt.tryBlock.getText(sourceFile);
   return BENIGN_PROBE_PATTERNS.some((p) => tryText.includes(p));
+}
+
+export function isErrorReporterGuardTryCatch(
+  sourceFile: ts.SourceFile,
+  tryStmt: ts.TryStatement,
+  catchBlock: ts.Block,
+): boolean {
+  if (catchBlock.statements.length !== 0) {
+    return false;
+  }
+  if (tryStmt.tryBlock.statements.length !== 1) {
+    return false;
+  }
+  const tryText = tryStmt.tryBlock.getText(sourceFile);
+  return ERROR_REPORTER_CALLBACK_RE.test(tryText);
 }

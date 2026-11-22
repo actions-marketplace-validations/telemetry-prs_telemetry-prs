@@ -868,3 +868,87 @@ agenda.define('nightly-reconcile', async (job: any) => {
     ],
   );
 });
+
+test('flags NextResponse.next in catch, ignores cookieStore.set as metric, and detects dynamic Hapi routes and error-reporter guards', () => {
+  const middlewareCode = `
+export async function updateSession(request: any) {
+  try {
+    const supabase = createClient(request);
+    await supabase.auth.getUser();
+  } catch (e) {
+    return NextResponse.next({ request: { headers: request.headers } });
+  }
+}
+`;
+
+  const serverActionCode = `
+'use server';
+export async function signInWithEmail(formData: FormData) {
+  const cookieStore = cookies();
+  const email = String(formData.get('email'));
+  cookieStore.set('preferredSignInView', 'email');
+  return redirect('/account');
+}
+`;
+
+  const hapiAndGuardsCode = `
+server.route({
+  method: route.method,
+  path: route.path,
+  handler: async (request: any, h: any) => {
+    const data = await loadData(request.params);
+    return h.response(data).code(200);
+  },
+});
+
+function reportAndWarn(error: unknown, name: string, deps: any) {
+  try {
+    deps.onSnapshotError?.(error, name);
+  } catch {}
+
+  try {
+    createQueue(name);
+  } catch (err) {
+    deps.onWarning(String(err));
+  }
+}
+`;
+
+  const report = analyzeTargets(
+    [
+      { filePath: 'utils/supabase/middleware.ts', content: middlewareCode },
+      { filePath: 'utils/auth-helpers/server.ts', content: serverActionCode },
+      { filePath: 'packages/hapi/src/HapiAdapter.ts', content: hapiAndGuardsCode },
+    ],
+    DEFAULT_CONFIG,
+  );
+
+  assert.deepEqual(
+    report.findings.map((f) => ({
+      filePath: f.filePath,
+      ruleId: f.ruleId,
+      framework: f.framework,
+      symbolName: f.symbolName,
+    })),
+    [
+      {
+        filePath: 'packages/hapi/src/HapiAdapter.ts',
+        ruleId: 'http-handlers',
+        framework: 'hapi',
+        symbolName: 'ROUTE (hapi route)',
+      },
+      {
+        filePath: 'utils/auth-helpers/server.ts',
+        ruleId: 'http-handlers',
+        framework: 'nextjs-server-action',
+        symbolName: 'action signInWithEmail',
+      },
+      {
+        filePath: 'utils/supabase/middleware.ts',
+        ruleId: 'error-swallowing',
+        framework: 'typescript',
+        symbolName: 'catch (e)',
+      },
+    ],
+  );
+});

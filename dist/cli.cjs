@@ -220113,8 +220113,8 @@ function parseUnifiedDiff(diffText) {
     if (line.startsWith("+") && !line.startsWith("+++")) {
       results.get(currentFile)?.add(currentNewLine);
       currentNewLine += 1;
-    } else if (line.startsWith("-") && !line.startsWith("---")) {
-    } else if (line.startsWith("\\")) {
+    } else if (line.startsWith("-") && !line.startsWith("---") || line.startsWith("\\")) {
+      continue;
     } else {
       currentNewLine += 1;
     }
@@ -220144,18 +220144,25 @@ var import_typescript2 = __toESM(require_typescript(), 1);
 var import_typescript = __toESM(require_typescript(), 1);
 var IGNORE_RE = /telemetry-prs-ignore(?::\s*([a-z0-9-,\s]+))?/i;
 var NON_METRIC_RECEIVER_RE = /(?:^|[.\s])(queue|queues|set|map|headers|cookies|session|cache|searchparams|params|res|reply|response|req|request|formdata|classlist|list|items|errors|tags|flags|store|db|redis|client|socket|router|app)$/i;
-var NON_METRIC_SUFFIX_RE = /(queue|queues|set|map|headers|cookies|session|cache|list|params)$/i;
+var NON_METRIC_SUFFIX_RE = /(queue|queues|set|map|headers|cookies|session|cache|list|params|store|storage|jar|bucket|state|registry|options|config|ctx|context)$/i;
 var AMBIGUOUS_METRIC_METHODS = /* @__PURE__ */ new Set([".add(", ".set("]);
-var ERROR_FORWARD_CALLEES = /* @__PURE__ */ new Set([
+var BARE_ERROR_FORWARD_CALLEES = /* @__PURE__ */ new Set([
   "next",
   "done",
   "cb",
   "callback",
-  "reject",
+  "reject"
+]);
+var METHOD_ERROR_FORWARD_CALLEES = /* @__PURE__ */ new Set([
   "errorhandler",
   "handleerror",
-  "onerror"
+  "onerror",
+  "onwarning",
+  "captureexception",
+  "capturemessage",
+  "notify"
 ]);
+var ERROR_REPORTER_CALLBACK_RE = /\b(on\w*error|errorhandler|handleerror|reporterror)\b/i;
 var BENIGN_PROBE_PATTERNS = [
   "JSON.parse(",
   "decodeURIComponent(",
@@ -220276,8 +220283,9 @@ function blockRethrows(sourceFile, block, catchVarName) {
     }
     if (import_typescript.default.isCallExpression(node) && node.arguments.length >= 1) {
       const callee = node.expression;
-      const calleeName = import_typescript.default.isIdentifier(callee) ? callee.text.toLowerCase() : import_typescript.default.isPropertyAccessExpression(callee) ? callee.name.text.toLowerCase() : "";
-      if (ERROR_FORWARD_CALLEES.has(calleeName)) {
+      const isBareIdentifier = import_typescript.default.isIdentifier(callee);
+      const calleeName = isBareIdentifier ? callee.text.toLowerCase() : import_typescript.default.isPropertyAccessExpression(callee) ? callee.name.text.toLowerCase() : "";
+      if (isBareIdentifier && BARE_ERROR_FORWARD_CALLEES.has(calleeName) || METHOD_ERROR_FORWARD_CALLEES.has(calleeName)) {
         handled = true;
         return;
       }
@@ -220313,6 +220321,16 @@ function isBenignProbeTryCatch(sourceFile, tryStmt, catchEffectiveLines) {
   }
   const tryText = tryStmt.tryBlock.getText(sourceFile);
   return BENIGN_PROBE_PATTERNS.some((p) => tryText.includes(p));
+}
+function isErrorReporterGuardTryCatch(sourceFile, tryStmt, catchBlock) {
+  if (catchBlock.statements.length !== 0) {
+    return false;
+  }
+  if (tryStmt.tryBlock.statements.length !== 1) {
+    return false;
+  }
+  const tryText = tryStmt.tryBlock.getText(sourceFile);
+  return ERROR_REPORTER_CALLBACK_RE.test(tryText);
 }
 
 // src/analyzer/ast.ts
@@ -220695,17 +220713,29 @@ function extractCodeUnits(filePath, sourceText, patterns) {
         if (handlerProp && handlerProp.node.body) {
           let url = "";
           let routePath = "";
+          let hasUrlProp = false;
+          let hasPathProp = false;
           let method = "ROUTE";
           for (const prop of obj.properties) {
             if (import_typescript2.default.isPropertyAssignment(prop)) {
               const name = prop.name.getText(sourceFile).replace(/^['"]|['"]$/g, "");
               const val = getStringLiteralText(prop.initializer);
-              if (name === "url" && val) url = val;
-              if (name === "path" && val) routePath = val;
+              if (name === "url") {
+                hasUrlProp = true;
+                if (val) url = val;
+              }
+              if (name === "path") {
+                hasPathProp = true;
+                if (val) routePath = val;
+              }
               if (name === "method" && val) method = val.toUpperCase();
+            } else if (import_typescript2.default.isShorthandPropertyAssignment(prop)) {
+              const name = prop.name.text;
+              if (name === "url") hasUrlProp = true;
+              if (name === "path") hasPathProp = true;
             }
           }
-          const isHapi = Boolean(routePath && !url);
+          const isHapi = hasPathProp && !hasUrlProp;
           const routeLabel = url || routePath || (isHapi ? "(hapi route)" : "(fastify route)");
           registerUnit(
             handlerProp.node,
@@ -221197,7 +221227,7 @@ function extractCodeUnits(filePath, sourceText, patterns) {
         sourceFile,
         node.block
       );
-      const isBenignProbe = parentTry !== null && isBenignProbeTryCatch(sourceFile, parentTry, catchEffectiveLines);
+      const isBenignProbe = parentTry !== null && (isBenignProbeTryCatch(sourceFile, parentTry, catchEffectiveLines) || isErrorReporterGuardTryCatch(sourceFile, parentTry, node.block));
       const rethrows = isBenignProbe || blockRethrows(sourceFile, node.block, catchVarName);
       const anchorNodes = parentTry ? [node, parentTry] : [node];
       const { startLine, endLine } = getLineRange(sourceFile, node);

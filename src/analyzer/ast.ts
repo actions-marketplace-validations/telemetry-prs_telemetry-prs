@@ -6,6 +6,7 @@ import {
   detectSignals,
   hasIgnoreDirective,
   isBenignProbeTryCatch,
+  isErrorReporterGuardTryCatch,
 } from './signals.ts';
 
 const HTTP_METHODS = new Set([
@@ -502,17 +503,29 @@ export function extractCodeUnits(
         if (handlerProp && handlerProp.node.body) {
           let url = '';
           let routePath = '';
+          let hasUrlProp = false;
+          let hasPathProp = false;
           let method = 'ROUTE';
           for (const prop of obj.properties) {
             if (ts.isPropertyAssignment(prop)) {
               const name = prop.name.getText(sourceFile).replace(/^['"]|['"]$/g, '');
               const val = getStringLiteralText(prop.initializer);
-              if (name === 'url' && val) url = val;
-              if (name === 'path' && val) routePath = val;
+              if (name === 'url') {
+                hasUrlProp = true;
+                if (val) url = val;
+              }
+              if (name === 'path') {
+                hasPathProp = true;
+                if (val) routePath = val;
+              }
               if (name === 'method' && val) method = val.toUpperCase();
+            } else if (ts.isShorthandPropertyAssignment(prop)) {
+              const name = prop.name.text;
+              if (name === 'url') hasUrlProp = true;
+              if (name === 'path') hasPathProp = true;
             }
           }
-          const isHapi = Boolean(routePath && !url);
+          const isHapi = hasPathProp && !hasUrlProp;
           const routeLabel = url || routePath || (isHapi ? '(hapi route)' : '(fastify route)');
           registerUnit(
             handlerProp.node,
@@ -1048,7 +1061,8 @@ export function extractCodeUnits(
       );
       const isBenignProbe =
         parentTry !== null &&
-        isBenignProbeTryCatch(sourceFile, parentTry, catchEffectiveLines);
+        (isBenignProbeTryCatch(sourceFile, parentTry, catchEffectiveLines) ||
+          isErrorReporterGuardTryCatch(sourceFile, parentTry, node.block));
       const rethrows =
         isBenignProbe || blockRethrows(sourceFile, node.block, catchVarName);
       const anchorNodes = parentTry ? [node, parentTry] : [node];

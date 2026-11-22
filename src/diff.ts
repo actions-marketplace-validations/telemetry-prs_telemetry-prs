@@ -24,12 +24,12 @@ export function parsePatchAddedLines(patch: string): Set<number> {
     if (line.startsWith('+') && !line.startsWith('+++')) {
       added.add(currentNewLine);
       currentNewLine += 1;
-    } else if (line.startsWith('-') && !line.startsWith('---')) {
-      // Deleted line: does not advance new file line counter
-    } else if (line.startsWith('\\')) {
-      // "\ No newline at end of file"
+    } else if (
+      (line.startsWith('-') && !line.startsWith('---')) ||
+      line.startsWith('\\')
+    ) {
+      continue;
     } else {
-
       currentNewLine += 1;
     }
   }
@@ -85,10 +85,11 @@ export function parseUnifiedDiff(diffText: string): DiffFile[] {
     if (line.startsWith('+') && !line.startsWith('+++')) {
       results.get(currentFile)?.add(currentNewLine);
       currentNewLine += 1;
-    } else if (line.startsWith('-') && !line.startsWith('---')) {
-      // Deleted line
-    } else if (line.startsWith('\\')) {
-      // Metadata line
+    } else if (
+      (line.startsWith('-') && !line.startsWith('---')) ||
+      line.startsWith('\\')
+    ) {
+      continue;
     } else {
       currentNewLine += 1;
     }
