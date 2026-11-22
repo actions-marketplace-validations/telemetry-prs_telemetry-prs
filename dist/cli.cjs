@@ -220543,6 +220543,40 @@ var GENERIC_SPAN_NAMES = /* @__PURE__ */ new Set([
 var OTEL_METRIC_VALUE_ATTR_METHODS = /* @__PURE__ */ new Set(["add", "record"]);
 var PROM_METRIC_ATTR_METHODS = /* @__PURE__ */ new Set(["inc", "dec", "observe", "set", "labels"]);
 var PROM_METRIC_CTORS = /* @__PURE__ */ new Set(["Counter", "Histogram", "Gauge", "Summary"]);
+var BROWSER_EXCLUDED_SERVER_PATH_RE = /(?:^|\/)(?:pages\/api|functions|lambdas|workers?|routes?|controllers?|handlers?)\/|(?:^|\/)route\.[jt]sx?$/i;
+var SERVER_IMPORT_RE = /^(?:node:|fs|path|http|https|http2|net|tls|crypto|stream|zlib|os|child_process|worker_threads|cluster|dgram|dns|express|fastify|koa|hono|@hapi\/|@nestjs\/|@trpc\/|bull|bullmq|kafkajs|amqplib|agenda|inngest|aws-lambda|@opentelemetry\/|prom-client|pino|winston|bunyan|dd-trace|hot-shots|playwright|puppeteer|jsdom|happy-dom)(?:\/|$)/;
+var DOCUMENT_DOM_PROPS = /* @__PURE__ */ new Set([
+  "getElementById",
+  "querySelector",
+  "querySelectorAll",
+  "createElement",
+  "createElementNS",
+  "addEventListener",
+  "documentElement",
+  "body",
+  "head",
+  "getElementsByClassName",
+  "getElementsByTagName",
+  "createDocumentFragment",
+  "createTextNode"
+]);
+var WINDOW_DOM_PROPS = /* @__PURE__ */ new Set([
+  "addEventListener",
+  "matchMedia",
+  "requestAnimationFrame",
+  "localStorage",
+  "sessionStorage",
+  "location",
+  "history",
+  "innerWidth",
+  "innerHeight",
+  "scrollTo"
+]);
+var BROWSER_OBSERVER_CTORS = /* @__PURE__ */ new Set([
+  "ResizeObserver",
+  "IntersectionObserver",
+  "MutationObserver"
+]);
 var HIGH_CARDINALITY_LABEL_KEY_RE = /^(?:id|uuid|guid|email|useremail|ip|clientip|ipaddress|remoteaddr|url|rawurl|fullurl|token|accesstoken|timestamp|createdat|errormessage|errmessage|stack|stacktrace|(?:user|customer|account|order|request|trace|span|session|correlation|job|invoice|payment|transaction|entity|record|item|member|org|organization|tenant)id)$/i;
 var HIGH_CARDINALITY_VALUE_RE = /\b(?:req|request)\.(?:url|originalUrl|path)\b|\b(?:err|error)\.(?:message|stack)\b|\bDate\.now\s*\(|\bnew\s+Date\s*\(|\b(?:crypto\.)?randomUUID\s*\(|\buuid(?:v[147])?\s*\(|\bMath\.random\s*\(/;
 function normalizeMetricLabelKey(raw) {
@@ -220654,6 +220688,66 @@ function isUseClientModule(sourceFile) {
 }
 function isUseServerModule(sourceFile) {
   return hasDirectivePrologue(sourceFile, "use server");
+}
+function isBrowserDomScript(sourceFile, normalizedPath) {
+  if (isUseServerModule(sourceFile) || BROWSER_EXCLUDED_SERVER_PATH_RE.test(normalizedPath)) {
+    return false;
+  }
+  let hasServerSignal = false;
+  let domHits = 0;
+  const visit = (node) => {
+    if (hasServerSignal) {
+      return;
+    }
+    if (import_typescript2.default.isImportDeclaration(node) && import_typescript2.default.isStringLiteral(node.moduleSpecifier) && SERVER_IMPORT_RE.test(node.moduleSpecifier.text)) {
+      hasServerSignal = true;
+      return;
+    }
+    if (import_typescript2.default.isCallExpression(node)) {
+      if (import_typescript2.default.isIdentifier(node.expression) && node.expression.text === "require") {
+        hasServerSignal = true;
+        return;
+      }
+      const calleeName = import_typescript2.default.isPropertyAccessExpression(node.expression) ? node.expression.name.text : import_typescript2.default.isIdentifier(node.expression) ? node.expression.text : null;
+      if (calleeName && OTEL_SPAN_METHODS.has(calleeName)) {
+        hasServerSignal = true;
+        return;
+      }
+    }
+    if (import_typescript2.default.isPropertyAccessExpression(node) && import_typescript2.default.isIdentifier(node.expression)) {
+      const base = node.expression.text;
+      const prop = node.name.text;
+      if (base === "process" || base === "module" && prop === "exports") {
+        hasServerSignal = true;
+        return;
+      }
+      if (base === "document" && DOCUMENT_DOM_PROPS.has(prop)) {
+        domHits += 1;
+      } else if (base === "window" && WINDOW_DOM_PROPS.has(prop)) {
+        domHits += 1;
+      } else if (base === "customElements" && prop === "define") {
+        domHits += 1;
+      }
+    }
+    if (import_typescript2.default.isNewExpression(node) && import_typescript2.default.isIdentifier(node.expression) && BROWSER_OBSERVER_CTORS.has(node.expression.text)) {
+      domHits += 1;
+    }
+    if (import_typescript2.default.isExportAssignment(node) && !node.isExportEquals) {
+      const exported = unwrapExpression(node.expression);
+      if (import_typescript2.default.isObjectLiteralExpression(exported)) {
+        for (const prop of exported.properties) {
+          const propName = prop.name?.getText(sourceFile).replace(/^['"]|['"]$/g, "");
+          if (propName === "fetch" || propName === "queue" || propName === "scheduled") {
+            hasServerSignal = true;
+            return;
+          }
+        }
+      }
+    }
+    import_typescript2.default.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return !hasServerSignal && domHits >= 2;
 }
 function getStringLiteralText(node) {
   if (!node) {
@@ -220812,7 +220906,7 @@ function extractCodeUnits(filePath, sourceText, patterns) {
     true,
     getScriptKind(normalizedPath)
   );
-  if (isUseClientModule(sourceFile)) {
+  if (isUseClientModule(sourceFile) || isBrowserDomScript(sourceFile, normalizedPath)) {
     return [];
   }
   const units = [];

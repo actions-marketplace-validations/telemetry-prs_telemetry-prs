@@ -20,6 +20,8 @@ exclude:
   - "**/examples/**"
   - "**/scripts/**"
   - "**/website/**"
+  - "**/public/**"
+  - "**/frontend/**"
 
 telemetry:
   spans:

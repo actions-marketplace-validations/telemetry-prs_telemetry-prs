@@ -1070,3 +1070,69 @@ function recordMetrics(req: any, err: Error, userId: string) {
   assert.ok(report.findings[2]?.message.includes('`err.message`'));
   assert.ok(report.findings[3]?.message.includes('`requestId`'));
 });
+
+test('skips pure browser DOM scripts while keeping server, Node, and domain document files checked', () => {
+  const browserScript = `
+(() => {
+  const form = document.querySelector('.feedback-form');
+  const status = document.getElementById('status');
+  new ResizeObserver(() => {}).observe(form);
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      const res = await fetch('/api/feedback', { method: 'POST' });
+      if (!res.ok) throw new Error('failed');
+      status.textContent = 'Sent';
+    } catch (err) {
+      status.textContent = err.message;
+    }
+  });
+})();
+`;
+
+  const backendDocumentService = `
+export async function syncRecord(document: any) {
+  try {
+    await document.save();
+  } catch (err) {
+    return { ok: false };
+  }
+}
+`;
+
+  const playwrightServerScript = `
+import { chromium } from 'playwright';
+
+export async function scrape(page: any) {
+  try {
+    await page.evaluate(() => {
+      const el = document.querySelector('#root');
+      return document.getElementById('title')?.textContent ?? el?.textContent;
+    });
+  } catch (err) {
+    return null;
+  }
+}
+`;
+
+  const report = analyzeTargets(
+    [
+      { filePath: 'drawn/engine.js', content: browserScript },
+      { filePath: 'src/services/records.ts', content: backendDocumentService },
+      { filePath: 'src/jobs/scraper.ts', content: playwrightServerScript },
+    ],
+    DEFAULT_CONFIG,
+  );
+
+  assert.deepEqual(
+    report.findings.map((f) => ({
+      filePath: f.filePath,
+      ruleId: f.ruleId,
+    })),
+    [
+      { filePath: 'src/jobs/scraper.ts', ruleId: 'queue-consumers' },
+      { filePath: 'src/jobs/scraper.ts', ruleId: 'error-swallowing' },
+      { filePath: 'src/services/records.ts', ruleId: 'error-swallowing' },
+    ],
+  );
+});

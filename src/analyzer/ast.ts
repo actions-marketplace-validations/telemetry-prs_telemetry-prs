@@ -78,6 +78,47 @@ const OTEL_METRIC_VALUE_ATTR_METHODS = new Set(['add', 'record']);
 const PROM_METRIC_ATTR_METHODS = new Set(['inc', 'dec', 'observe', 'set', 'labels']);
 const PROM_METRIC_CTORS = new Set(['Counter', 'Histogram', 'Gauge', 'Summary']);
 
+const BROWSER_EXCLUDED_SERVER_PATH_RE =
+  /(?:^|\/)(?:pages\/api|functions|lambdas|workers?|routes?|controllers?|handlers?)\/|(?:^|\/)route\.[jt]sx?$/i;
+
+const SERVER_IMPORT_RE =
+  /^(?:node:|fs|path|http|https|http2|net|tls|crypto|stream|zlib|os|child_process|worker_threads|cluster|dgram|dns|express|fastify|koa|hono|@hapi\/|@nestjs\/|@trpc\/|bull|bullmq|kafkajs|amqplib|agenda|inngest|aws-lambda|@opentelemetry\/|prom-client|pino|winston|bunyan|dd-trace|hot-shots|playwright|puppeteer|jsdom|happy-dom)(?:\/|$)/;
+
+const DOCUMENT_DOM_PROPS = new Set([
+  'getElementById',
+  'querySelector',
+  'querySelectorAll',
+  'createElement',
+  'createElementNS',
+  'addEventListener',
+  'documentElement',
+  'body',
+  'head',
+  'getElementsByClassName',
+  'getElementsByTagName',
+  'createDocumentFragment',
+  'createTextNode',
+]);
+
+const WINDOW_DOM_PROPS = new Set([
+  'addEventListener',
+  'matchMedia',
+  'requestAnimationFrame',
+  'localStorage',
+  'sessionStorage',
+  'location',
+  'history',
+  'innerWidth',
+  'innerHeight',
+  'scrollTo',
+]);
+
+const BROWSER_OBSERVER_CTORS = new Set([
+  'ResizeObserver',
+  'IntersectionObserver',
+  'MutationObserver',
+]);
+
 const HIGH_CARDINALITY_LABEL_KEY_RE =
   /^(?:id|uuid|guid|email|useremail|ip|clientip|ipaddress|remoteaddr|url|rawurl|fullurl|token|accesstoken|timestamp|createdat|errormessage|errmessage|stack|stacktrace|(?:user|customer|account|order|request|trace|span|session|correlation|job|invoice|payment|transaction|entity|record|item|member|org|organization|tenant)id)$/i;
 
@@ -225,6 +266,100 @@ function isUseClientModule(sourceFile: ts.SourceFile): boolean {
 
 function isUseServerModule(sourceFile: ts.SourceFile): boolean {
   return hasDirectivePrologue(sourceFile, 'use server');
+}
+
+function isBrowserDomScript(
+  sourceFile: ts.SourceFile,
+  normalizedPath: string,
+): boolean {
+  if (
+    isUseServerModule(sourceFile) ||
+    BROWSER_EXCLUDED_SERVER_PATH_RE.test(normalizedPath)
+  ) {
+    return false;
+  }
+
+  let hasServerSignal = false;
+  let domHits = 0;
+
+  const visit = (node: ts.Node): void => {
+    if (hasServerSignal) {
+      return;
+    }
+
+    if (
+      ts.isImportDeclaration(node) &&
+      ts.isStringLiteral(node.moduleSpecifier) &&
+      SERVER_IMPORT_RE.test(node.moduleSpecifier.text)
+    ) {
+      hasServerSignal = true;
+      return;
+    }
+
+    if (ts.isCallExpression(node)) {
+      if (ts.isIdentifier(node.expression) && node.expression.text === 'require') {
+        hasServerSignal = true;
+        return;
+      }
+      const calleeName = ts.isPropertyAccessExpression(node.expression)
+        ? node.expression.name.text
+        : ts.isIdentifier(node.expression)
+          ? node.expression.text
+          : null;
+      if (calleeName && OTEL_SPAN_METHODS.has(calleeName)) {
+        hasServerSignal = true;
+        return;
+      }
+    }
+
+    if (ts.isPropertyAccessExpression(node) && ts.isIdentifier(node.expression)) {
+      const base = node.expression.text;
+      const prop = node.name.text;
+      if (base === 'process' || (base === 'module' && prop === 'exports')) {
+        hasServerSignal = true;
+        return;
+      }
+      if (base === 'document' && DOCUMENT_DOM_PROPS.has(prop)) {
+        domHits += 1;
+      } else if (base === 'window' && WINDOW_DOM_PROPS.has(prop)) {
+        domHits += 1;
+      } else if (base === 'customElements' && prop === 'define') {
+        domHits += 1;
+      }
+    }
+
+    if (
+      ts.isNewExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      BROWSER_OBSERVER_CTORS.has(node.expression.text)
+    ) {
+      domHits += 1;
+    }
+
+    if (ts.isExportAssignment(node) && !node.isExportEquals) {
+      const exported = unwrapExpression(node.expression);
+      if (ts.isObjectLiteralExpression(exported)) {
+        for (const prop of exported.properties) {
+          const propName = prop.name
+            ?.getText(sourceFile)
+            .replace(/^['"]|['"]$/g, '');
+          if (
+            propName === 'fetch' ||
+            propName === 'queue' ||
+            propName === 'scheduled'
+          ) {
+            hasServerSignal = true;
+            return;
+          }
+        }
+      }
+    }
+
+    ts.forEachChild(node, visit);
+  };
+
+  visit(sourceFile);
+  return !hasServerSignal && domHits >= 2;
 }
 
 function getStringLiteralText(node: ts.Expression | undefined): string | null {
@@ -448,7 +583,7 @@ export function extractCodeUnits(
     getScriptKind(normalizedPath),
   );
 
-  if (isUseClientModule(sourceFile)) {
+  if (isUseClientModule(sourceFile) || isBrowserDomScript(sourceFile, normalizedPath)) {
     return [];
   }
 

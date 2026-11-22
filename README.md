@@ -18,7 +18,7 @@ Available on **[GitHub Marketplace](https://github.com/marketplace/actions/telem
 
 - **Your code never leaves your CI runner.** No SaaS upload, no LLM API keys, no external network calls.
 - **Vendor-neutral.** Works with OpenTelemetry going to Datadog, Grafana, Honeycomb, Dash0, Jaeger, or anything else.
-- **Quiet by default.** Only checks code units touched by the PR diff, skips trivial 1–3 line delegators and frontend `'use client'` files, updates a single PR comment in place with clickable file links, stays silent on clean PRs, defaults inline diff annotations to `false`, and supports inline `// telemetry-prs-ignore` directives.
+- **Quiet by default.** Only checks code units touched by the PR diff, skips trivial 1–3 line delegators, `'use client'` modules, and pure browser DOM scripts, updates a single PR comment in place with clickable file links, stays silent on clean PRs, defaults inline diff annotations to `false`, and supports inline `// telemetry-prs-ignore` directives.
 - **Repo-aware.** Detects when no observability or structured logging SDK is configured in `package.json` or `wrangler.toml`.
 
 ## Quickstart (GitHub Action)
@@ -99,6 +99,15 @@ router.post('/internal/noop', async (req, res) => { ... });
 // telemetry-prs-ignore: metric-cardinality
 // telemetry-prs-ignore: error-swallowing
 // telemetry-prs-ignore: otel-naming
+```
+
+To exclude frontend or static asset folders across a monorepo, add them under `exclude` in `.telemetry-prs.yml` (see [`.telemetry-prs.example.yml`](.telemetry-prs.example.yml)):
+
+```yaml
+exclude:
+  - "**/public/**"
+  - "**/frontend/**"
+  - "**/client/**"
 ```
 
 ## Local CLI
