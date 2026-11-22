@@ -7,7 +7,9 @@ import test from 'node:test';
 import { analyzeTargets } from '../src/analyzer/index.ts';
 import { DEFAULT_CONFIG, loadConfig } from '../src/config.ts';
 import { runInit } from '../src/init.ts';
+import { formatPrComment, formatTerminalReport } from '../src/reporter/markdown.ts';
 import { buildSarifReport } from '../src/reporter/sarif.ts';
+import { detectRepoTelemetry } from '../src/repo-telemetry.ts';
 
 function makeTempDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -144,5 +146,73 @@ test('CLI check runs end-to-end on a git diff and respects --mode fail and --for
     assert.ok(failRun.stdout.includes('Worker(payouts)'));
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('detectRepoTelemetry flags missing observability SDKs and detects package.json and wrangler observability', () => {
+  const emptyRepo = makeTempDir('telemetry-prs-nosdk-');
+  const monorepo = makeTempDir('telemetry-prs-otel-');
+  const cfRepo = makeTempDir('telemetry-prs-cf-');
+
+  try {
+    fs.writeFileSync(
+      path.join(emptyRepo, 'package.json'),
+      JSON.stringify({ devDependencies: { wrangler: '^4.0.0' } }),
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(emptyRepo, 'wrangler.toml'),
+      'name = "demo"\ncompatibility_date = "2026-09-01"\n',
+      'utf8',
+    );
+
+    const noSdk = detectRepoTelemetry(emptyRepo);
+    assert.equal(noSdk.hasAnySdk, false);
+    assert.equal(noSdk.hasWranglerConfig, true);
+    assert.equal(noSdk.checkedManifests, 2);
+
+    const report = analyzeTargets(
+      [
+        {
+          filePath: 'functions/api/status.js',
+          content: `export async function onRequestGet({ request, env }) {\n  const a = 1;\n  const b = 2;\n  return Response.json({ a, b });\n}\n`,
+        },
+      ],
+      DEFAULT_CONFIG,
+    );
+    report.repoTelemetry = noSdk;
+
+    const md = formatPrComment(report);
+    assert.ok(md.includes('No observability SDK detected in this repo'));
+    assert.ok(md.includes('[observability]'));
+    const term = formatTerminalReport(report);
+    assert.ok(term.includes('No observability SDK detected in this repo'));
+
+    fs.mkdirSync(path.join(monorepo, 'packages', 'api'), { recursive: true });
+    fs.writeFileSync(
+      path.join(monorepo, 'packages', 'api', 'package.json'),
+      JSON.stringify({ dependencies: { '@opentelemetry/api': '^1.9.0' } }),
+      'utf8',
+    );
+    const withOtel = detectRepoTelemetry(monorepo);
+    assert.equal(withOtel.hasAnySdk, true);
+    assert.deepEqual(withOtel.detectedSdks, ['@opentelemetry/api']);
+
+    report.repoTelemetry = withOtel;
+    assert.ok(!formatPrComment(report).includes('No observability SDK detected'));
+
+    fs.mkdirSync(path.join(cfRepo, 'worker'), { recursive: true });
+    fs.writeFileSync(
+      path.join(cfRepo, 'worker', 'wrangler.toml'),
+      'name = "worker"\n\n[observability]\nenabled = true\n',
+      'utf8',
+    );
+    const withCf = detectRepoTelemetry(cfRepo);
+    assert.equal(withCf.hasAnySdk, true);
+    assert.deepEqual(withCf.detectedSdks, ['cloudflare-observability']);
+  } finally {
+    fs.rmSync(emptyRepo, { recursive: true, force: true });
+    fs.rmSync(monorepo, { recursive: true, force: true });
+    fs.rmSync(cfRepo, { recursive: true, force: true });
   }
 });

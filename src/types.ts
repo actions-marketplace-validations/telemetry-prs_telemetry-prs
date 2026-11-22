@@ -76,6 +76,13 @@ export interface Finding {
   suggestion: string;
 }
 
+export interface RepoTelemetryStatus {
+  checkedManifests: number;
+  detectedSdks: string[];
+  hasWranglerConfig: boolean;
+  hasAnySdk: boolean;
+}
+
 export interface AnalysisReport {
   checkedFiles: number;
   checkedUnits: number;
@@ -84,4 +91,5 @@ export interface AnalysisReport {
   findings: Finding[];
   errorsCount: number;
   warningsCount: number;
+  repoTelemetry?: RepoTelemetryStatus;
 }

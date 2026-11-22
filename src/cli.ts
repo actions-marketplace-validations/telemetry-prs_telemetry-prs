@@ -10,6 +10,7 @@ import {
 import { loadConfig } from './config.ts';
 import { parseUnifiedDiff } from './diff.ts';
 import { runInit } from './init.ts';
+import { detectRepoTelemetry } from './repo-telemetry.ts';
 import {
   formatPrComment,
   formatTerminalReport,
@@ -98,6 +99,10 @@ function main(): void {
     }
     if (result.detectedPackages.length > 0) {
       console.log(`Detected telemetry/logging packages: ${result.detectedPackages.join(', ')}`);
+    } else {
+      console.log(
+        'No observability or structured logging SDK detected in package.json (install e.g. @opentelemetry/api or configure custom patterns in .telemetry-prs.yml).',
+      );
     }
     if (result.detectedDirs.length > 0) {
       console.log(`Detected source directories: ${result.detectedDirs.join(', ')}`);
@@ -144,6 +149,7 @@ function main(): void {
       content: fs.readFileSync(path.join(scanRoot, relPath), 'utf8'),
     }));
     report = analyzeTargets(targets, config);
+    report.repoTelemetry = detectRepoTelemetry(scanRoot);
   } else {
     console.error(`Unknown command: ${command}`);
     printUsage();

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { minimatch } from 'minimatch';
 import { rangeTouchesAddedLines } from '../diff.ts';
+import { detectRepoTelemetry } from '../repo-telemetry.ts';
 import type {
   AnalysisReport,
   CodeUnit,
@@ -256,5 +257,7 @@ export function analyzeDiffFiles(
     });
   }
 
-  return analyzeTargets(targets, config);
+  const report = analyzeTargets(targets, config);
+  report.repoTelemetry = detectRepoTelemetry(cwd);
+  return report;
 }

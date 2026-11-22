@@ -66,6 +66,21 @@ export function formatPrComment(
   lines.push(
     `Telemetry coverage on touched code: **${report.coveragePercent}%** (${report.passedUnits}/${report.checkedUnits} passed across ${report.checkedFiles} file(s)).`,
   );
+
+  if (
+    report.repoTelemetry &&
+    report.repoTelemetry.checkedManifests > 0 &&
+    !report.repoTelemetry.hasAnySdk
+  ) {
+    const setupHint = report.repoTelemetry.hasWranglerConfig
+      ? 'Wire up `@opentelemetry/api` or enable `[observability]` in `wrangler.toml` first'
+      : 'Wire up an SDK (e.g. `@opentelemetry/api`, `prom-client`, `pino`, or `winston`) first';
+    lines.push('');
+    lines.push(
+      `> **No observability SDK detected in this repo** (\`package.json\`${report.repoTelemetry.hasWranglerConfig ? ' / `wrangler.toml`' : ''}). ${setupHint}, or configure custom library patterns in \`.telemetry-prs.yml\`.`,
+    );
+  }
+
   lines.push('');
   lines.push('| Severity | Location | Rule | Finding |');
   lines.push('| :--- | :--- | :--- | :--- |');
@@ -104,8 +119,22 @@ export function formatTerminalReport(report: AnalysisReport): string {
 
   const lines: string[] = [
     `Telemetry PRs: ${report.coveragePercent}% coverage (${report.passedUnits}/${report.checkedUnits} passed) — found ${report.findings.length} gap(s) (${report.errorsCount} error(s), ${report.warningsCount} warning(s)) across ${report.checkedFiles} file(s):`,
-    '',
   ];
+
+  if (
+    report.repoTelemetry &&
+    report.repoTelemetry.checkedManifests > 0 &&
+    !report.repoTelemetry.hasAnySdk
+  ) {
+    const setupHint = report.repoTelemetry.hasWranglerConfig
+      ? 'install @opentelemetry/api or enable [observability] in wrangler.toml'
+      : 'install @opentelemetry/api (or pino/winston/prom-client)';
+    lines.push(
+      `Note: No observability SDK detected in this repo (${setupHint}, or configure custom patterns in .telemetry-prs.yml).`,
+    );
+  }
+
+  lines.push('');
 
   for (const f of report.findings) {
     const tag = f.severity === 'error' ? 'ERROR' : 'WARN ';
