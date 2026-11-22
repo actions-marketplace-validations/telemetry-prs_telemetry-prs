@@ -952,3 +952,50 @@ function reportAndWarn(error: unknown, name: string, deps: any) {
     ],
   );
 });
+
+test('skips helper exports in worker/src/ packages and detects Cloudflare Pages onRequest handlers', () => {
+  const workerHelperCode = `
+export function allTargets(env: any) {
+  const priv = parseList(env.PRIVATE_TARGETS);
+  const pub = parseList(env.PUBLIC_TARGETS);
+  return [...pub, ...priv];
+}
+`;
+
+  const cfPagesCode = `
+export async function onRequestGet({ request, env, waitUntil }: any) {
+  const key = new Request(new URL('/api/status', request.url).toString());
+  const hit = await caches.default.match(key);
+  if (hit) return hit;
+  const res = await statusApi(request, env, false);
+  if (res.ok) waitUntil(caches.default.put(key, res.clone()));
+  return res;
+}
+`;
+
+  const report = analyzeTargets(
+    [
+      { filePath: 'worker/src/targets.js', content: workerHelperCode },
+      { filePath: 'functions/api/status.js', content: cfPagesCode },
+    ],
+    DEFAULT_CONFIG,
+  );
+
+  assert.equal(report.errorsCount, 0);
+  assert.deepEqual(
+    report.findings.map((f) => ({
+      filePath: f.filePath,
+      ruleId: f.ruleId,
+      framework: f.framework,
+      symbolName: f.symbolName,
+    })),
+    [
+      {
+        filePath: 'functions/api/status.js',
+        ruleId: 'http-handlers',
+        framework: 'cloudflare-pages',
+        symbolName: 'onRequestGet functions/api/status.js',
+      },
+    ],
+  );
+});

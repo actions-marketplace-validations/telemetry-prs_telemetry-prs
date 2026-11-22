@@ -42,5 +42,5 @@ outputs:
     description: 'Percentage of touched handlers, workers, catch blocks, and spans passing telemetry checks'
 
 runs:
-  using: 'node20'
+  using: 'node24'
   main: 'dist/index.cjs'

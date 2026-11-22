@@ -27,7 +27,7 @@ jobs:
   telemetry-prs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: telemetry-prs/telemetry-prs@v0.1.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -56,7 +56,7 @@ Outputs: `findings-count`, `errors-count`, `warnings-count`, `coverage-percent`.
 
 | Rule | Default Severity | What it checks |
 | :--- | :--- | :--- |
-| `http-handlers` | `warning` | Express, Fastify, Hapi, Hono, Koa, NestJS, Next.js App Router, Next.js Pages API, Next.js `'use server'` actions, tRPC procedures, AWS Lambda HTTP handlers, Cloudflare Workers `fetch`, and GraphQL `Query`/`Mutation` resolvers missing a custom span or business metric |
+| `http-handlers` | `warning` | Express, Fastify, Hapi, Hono, Koa, NestJS, Next.js App Router, Next.js Pages API, Next.js `'use server'` actions, tRPC procedures, AWS Lambda HTTP handlers, Cloudflare Workers `fetch`, Cloudflare Pages `onRequest*` functions, and GraphQL `Query`/`Mutation` resolvers missing a custom span or business metric |
 | `queue-consumers` | `error` | BullMQ `Worker`, Bull `queue.process`, Agenda `agenda.define`, KafkaJS `eachMessage`/`eachBatch`, RabbitMQ `channel.consume`, SQS consumers, cron jobs, Inngest, AWS Lambda queue/event handlers, Cloudflare Workers `queue`/`scheduled`, and `workers/` functions |
 | `error-swallowing` | `warning` | `catch` blocks that do not rethrow or forward errors (`next(e)`, `done(e)`, `emit('error', ...)`) and emit no `recordException`, structured error log, or error metric (benign parse/probe fallbacks like `JSON.parse` are skipped) |
 | `otel-naming` | `warning` | `startActiveSpan` / `startSpan` calls with high-cardinality dynamic names (`` `user-${id}` ``, `'order-' + id`) or empty/generic names (`'handler'`, `'fn'`, `'span'`) |

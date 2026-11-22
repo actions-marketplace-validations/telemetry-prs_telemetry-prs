@@ -220364,8 +220364,20 @@ var NEST_HTTP_DECORATORS = /* @__PURE__ */ new Set([
   "Head"
 ]);
 var WORKER_DIR_RE = /(?:^|\/)(workers?|jobs?|consumers?|queues?)\//i;
+var WORKER_PACKAGE_ROOT_RE = /(?:^|\/)workers?\/(?:src|lib|app|utils|helpers)\//i;
 var HTTP_ROUTE_DIR_RE = /(?:^|\/)(api|routes?|controllers?)\//i;
 var WORKER_NAME_RE = /^(process|consume|handle)[A-Z]\w*(Job|Message|Event|Task|Queue)$/;
+var CLOUDFLARE_PAGES_DIR_RE = /(?:^|\/)functions\//i;
+var CLOUDFLARE_PAGES_HANDLERS = /* @__PURE__ */ new Set([
+  "onRequest",
+  "onRequestGet",
+  "onRequestPost",
+  "onRequestPut",
+  "onRequestPatch",
+  "onRequestDelete",
+  "onRequestHead",
+  "onRequestOptions"
+]);
 var LAMBDA_DIR_RE = /(?:^|\/)(functions?|lambdas?|handlers?|api)\//i;
 var LAMBDA_TYPE_RE = /(Event|APIGateway|SQS|EventBridge|Scheduled)/;
 var LAMBDA_QUEUE_TYPE_RE = /(SQSEvent|SQSHandler|EventBridge|Scheduled)/i;
@@ -220617,7 +220629,8 @@ function extractCodeUnits(filePath, sourceText, patterns) {
       foundSignals
     });
   };
-  const isWorkerFile = WORKER_DIR_RE.test(normalizedPath) && !HTTP_ROUTE_DIR_RE.test(normalizedPath);
+  const isWorkerFile = WORKER_DIR_RE.test(normalizedPath) && !WORKER_PACKAGE_ROOT_RE.test(normalizedPath) && !HTTP_ROUTE_DIR_RE.test(normalizedPath);
+  const isCloudflarePagesFile = CLOUDFLARE_PAGES_DIR_RE.test(normalizedPath);
   const isNextRouteFile = /(?:^|\/)route\.[jt]sx?$/i.test(normalizedPath);
   const isNextPagesApiFile = /(?:^|\/)pages\/api\/.+\.[jt]s$/i.test(normalizedPath);
   const isServerActionsFile = isUseServerModule(sourceFile);
@@ -220978,6 +220991,18 @@ function extractCodeUnits(filePath, sourceText, patterns) {
           },
           node.body
         );
+      } else if (hasExportModifier(node) && isCloudflarePagesFile && CLOUDFLARE_PAGES_HANDLERS.has(fnName)) {
+        registerUnit(
+          node,
+          [node],
+          {
+            ruleId: "http-handlers",
+            kind: "http-handler",
+            symbolName: `${fnName} ${normalizedPath}`,
+            framework: "cloudflare-pages"
+          },
+          node.body
+        );
       } else if (hasExportModifier(node) && isServerActionsFile && hasAsyncModifier(node)) {
         registerUnit(
           node,
@@ -221055,6 +221080,19 @@ function extractCodeUnits(filePath, sourceText, patterns) {
               kind: "http-handler",
               symbolName: `${varName} ${normalizedPath}`,
               framework: "nextjs"
+            },
+            unwrapped.fn.body,
+            unwrapped.wrapperCalleeText
+          );
+        } else if (isCloudflarePagesFile && CLOUDFLARE_PAGES_HANDLERS.has(varName)) {
+          registerUnit(
+            unwrapped.fn,
+            [unwrapped.fn, decl, node],
+            {
+              ruleId: "http-handlers",
+              kind: "http-handler",
+              symbolName: `${varName} ${normalizedPath}`,
+              framework: "cloudflare-pages"
             },
             unwrapped.fn.body,
             unwrapped.wrapperCalleeText
@@ -221683,7 +221721,7 @@ jobs:
   telemetry-prs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: telemetry-prs/telemetry-prs@v0.1.0
         with:
           github-token: \${{ secrets.GITHUB_TOKEN }}

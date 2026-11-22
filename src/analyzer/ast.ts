@@ -42,8 +42,21 @@ const NEST_HTTP_DECORATORS = new Set([
 ]);
 
 const WORKER_DIR_RE = /(?:^|\/)(workers?|jobs?|consumers?|queues?)\//i;
+const WORKER_PACKAGE_ROOT_RE = /(?:^|\/)workers?\/(?:src|lib|app|utils|helpers)\//i;
 const HTTP_ROUTE_DIR_RE = /(?:^|\/)(api|routes?|controllers?)\//i;
 const WORKER_NAME_RE = /^(process|consume|handle)[A-Z]\w*(Job|Message|Event|Task|Queue)$/;
+
+const CLOUDFLARE_PAGES_DIR_RE = /(?:^|\/)functions\//i;
+const CLOUDFLARE_PAGES_HANDLERS = new Set([
+  'onRequest',
+  'onRequestGet',
+  'onRequestPost',
+  'onRequestPut',
+  'onRequestPatch',
+  'onRequestDelete',
+  'onRequestHead',
+  'onRequestOptions',
+]);
 
 const LAMBDA_DIR_RE = /(?:^|\/)(functions?|lambdas?|handlers?|api)\//i;
 const LAMBDA_TYPE_RE = /(Event|APIGateway|SQS|EventBridge|Scheduled)/;
@@ -395,7 +408,10 @@ export function extractCodeUnits(
   };
 
   const isWorkerFile =
-    WORKER_DIR_RE.test(normalizedPath) && !HTTP_ROUTE_DIR_RE.test(normalizedPath);
+    WORKER_DIR_RE.test(normalizedPath) &&
+    !WORKER_PACKAGE_ROOT_RE.test(normalizedPath) &&
+    !HTTP_ROUTE_DIR_RE.test(normalizedPath);
+  const isCloudflarePagesFile = CLOUDFLARE_PAGES_DIR_RE.test(normalizedPath);
   const isNextRouteFile = /(?:^|\/)route\.[jt]sx?$/i.test(normalizedPath);
   const isNextPagesApiFile = /(?:^|\/)pages\/api\/.+\.[jt]s$/i.test(normalizedPath);
   const isServerActionsFile = isUseServerModule(sourceFile);
@@ -784,6 +800,22 @@ export function extractCodeUnits(
           },
           node.body,
         );
+      } else if (
+        hasExportModifier(node) &&
+        isCloudflarePagesFile &&
+        CLOUDFLARE_PAGES_HANDLERS.has(fnName)
+      ) {
+        registerUnit(
+          node,
+          [node],
+          {
+            ruleId: 'http-handlers',
+            kind: 'http-handler',
+            symbolName: `${fnName} ${normalizedPath}`,
+            framework: 'cloudflare-pages',
+          },
+          node.body,
+        );
       } else if (hasExportModifier(node) && isServerActionsFile && hasAsyncModifier(node)) {
         registerUnit(
           node,
@@ -866,6 +898,19 @@ export function extractCodeUnits(
               kind: 'http-handler',
               symbolName: `${varName} ${normalizedPath}`,
               framework: 'nextjs',
+            },
+            unwrapped.fn.body,
+            unwrapped.wrapperCalleeText,
+          );
+        } else if (isCloudflarePagesFile && CLOUDFLARE_PAGES_HANDLERS.has(varName)) {
+          registerUnit(
+            unwrapped.fn,
+            [unwrapped.fn, decl, node],
+            {
+              ruleId: 'http-handlers',
+              kind: 'http-handler',
+              symbolName: `${varName} ${normalizedPath}`,
+              framework: 'cloudflare-pages',
             },
             unwrapped.fn.body,
             unwrapped.wrapperCalleeText,

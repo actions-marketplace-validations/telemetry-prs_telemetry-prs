@@ -67,7 +67,7 @@ jobs:
   telemetry-prs:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: telemetry-prs/telemetry-prs@v0.1.0
         with:
           github-token: \${{ secrets.GITHUB_TOKEN }}

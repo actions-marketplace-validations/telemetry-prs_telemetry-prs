@@ -1,0 +1,17 @@
+name: Telemetry Check
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  telemetry-prs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
