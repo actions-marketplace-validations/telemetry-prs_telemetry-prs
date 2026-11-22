@@ -8,6 +8,12 @@ Catch missing OpenTelemetry spans, metrics, and logs in TypeScript/Node.js pull 
 
 Auto-instrumentation covers HTTP and database calls, not the business logic, background jobs, queue consumers, and silent catch blocks that leave teams blind during outages. Telemetry PRs runs on every PR diff, reports touched-code telemetry coverage, and flags uninstrumented paths before they merge.
 
+Available on **[GitHub Marketplace](https://github.com/marketplace/actions/telemetry-prs)**.
+
+<p align="center">
+  <img src="assets/pr-comment-preview.png" alt="Example Telemetry PRs pull request comment showing coverage percentage, findings table, and suggested instrumentation hints" width="820" />
+</p>
+
 ## Why CI-native & static?
 
 - **Your code never leaves your CI runner.** No SaaS upload, no LLM API keys, no external network calls.
