@@ -68,7 +68,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: telemetry-prs/telemetry-prs@v0.1.0
+      - uses: telemetry-prs/telemetry-prs@v0
         with:
           github-token: \${{ secrets.GITHUB_TOKEN }}
 `;
@@ -125,7 +125,7 @@ export function runInit(options: InitOptions): InitResult {
 
   const configObject = {
     version: 1,
-    mode: DEFAULT_CONFIG.mode,
+    blockOn: DEFAULT_CONFIG.blockOn,
     include: includeGlobs.length > 0 ? includeGlobs : DEFAULT_CONFIG.include,
     exclude: DEFAULT_CONFIG.exclude,
     telemetry: {
@@ -135,30 +135,34 @@ export function runInit(options: InitOptions): InitResult {
       logs: unique(logs),
     },
     rules: {
-      'http-handlers': {
-        enabled: DEFAULT_CONFIG.rules['http-handlers'].enabled,
-        severity: DEFAULT_CONFIG.rules['http-handlers'].severity,
-        require: DEFAULT_CONFIG.rules['http-handlers'].require,
-        matchMode: DEFAULT_CONFIG.rules['http-handlers'].matchMode,
-        minLines: DEFAULT_CONFIG.rules['http-handlers'].minLines,
+      'metric-cardinality': {
+        enabled: DEFAULT_CONFIG.rules['metric-cardinality'].enabled,
+        impact: DEFAULT_CONFIG.rules['metric-cardinality'].impact,
       },
       'queue-consumers': {
         enabled: DEFAULT_CONFIG.rules['queue-consumers'].enabled,
-        severity: DEFAULT_CONFIG.rules['queue-consumers'].severity,
+        impact: DEFAULT_CONFIG.rules['queue-consumers'].impact,
         require: DEFAULT_CONFIG.rules['queue-consumers'].require,
         matchMode: DEFAULT_CONFIG.rules['queue-consumers'].matchMode,
         minLines: DEFAULT_CONFIG.rules['queue-consumers'].minLines,
       },
       'error-swallowing': {
         enabled: DEFAULT_CONFIG.rules['error-swallowing'].enabled,
-        severity: DEFAULT_CONFIG.rules['error-swallowing'].severity,
+        impact: DEFAULT_CONFIG.rules['error-swallowing'].impact,
         require: DEFAULT_CONFIG.rules['error-swallowing'].require,
         matchMode: DEFAULT_CONFIG.rules['error-swallowing'].matchMode,
         minLines: DEFAULT_CONFIG.rules['error-swallowing'].minLines,
       },
+      'http-handlers': {
+        enabled: DEFAULT_CONFIG.rules['http-handlers'].enabled,
+        impact: DEFAULT_CONFIG.rules['http-handlers'].impact,
+        require: DEFAULT_CONFIG.rules['http-handlers'].require,
+        matchMode: DEFAULT_CONFIG.rules['http-handlers'].matchMode,
+        minLines: DEFAULT_CONFIG.rules['http-handlers'].minLines,
+      },
       'otel-naming': {
         enabled: DEFAULT_CONFIG.rules['otel-naming'].enabled,
-        severity: DEFAULT_CONFIG.rules['otel-naming'].severity,
+        impact: DEFAULT_CONFIG.rules['otel-naming'].impact,
       },
     },
   };

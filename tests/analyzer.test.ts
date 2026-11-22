@@ -50,7 +50,7 @@ router.delete('/orders/:id', withSpan('http.cancel_order', async (req, res) => {
   assert.equal(report.findings.length, 1);
   assert.equal(report.findings[0]?.ruleId, 'http-handlers');
   assert.equal(report.findings[0]?.symbolName, 'POST /checkout');
-  assert.equal(report.findings[0]?.severity, 'warning');
+  assert.equal(report.findings[0]?.impact, 'medium');
 });
 
 test('flags uninstrumented BullMQ and KafkaJS workers as errors', () => {
@@ -81,7 +81,7 @@ new Worker('email-send', async (job) => {
     DEFAULT_CONFIG,
   );
 
-  assert.equal(report.errorsCount, 2);
+  assert.equal(report.highImpactCount, 2);
   assert.deepEqual(
     report.findings.map((f) => f.symbolName),
     ['Worker(invoice-pdf)', 'kafka.eachMessage'],
@@ -365,38 +365,38 @@ export async function handler(value: number) {
     report.findings.map((f) => ({
       filePath: f.filePath,
       ruleId: f.ruleId,
-      severity: f.severity,
+      impact: f.impact,
       framework: f.framework,
     })),
     [
       {
-        filePath: 'functions/create-order.ts',
-        ruleId: 'http-handlers',
-        severity: 'warning',
-        framework: 'aws-lambda',
-      },
-      {
         filePath: 'handlers/warehouse-sync.ts',
         ruleId: 'queue-consumers',
-        severity: 'error',
+        impact: 'high',
         framework: 'aws-lambda',
       },
       {
         filePath: 'lambdas/order-consumer.ts',
         ruleId: 'queue-consumers',
-        severity: 'error',
+        impact: 'high',
         framework: 'aws-lambda',
       },
       {
         filePath: 'src/cron-cleanup.ts',
         ruleId: 'queue-consumers',
-        severity: 'error',
+        impact: 'high',
+        framework: 'aws-lambda',
+      },
+      {
+        filePath: 'functions/create-order.ts',
+        ruleId: 'http-handlers',
+        impact: 'medium',
         framework: 'aws-lambda',
       },
       {
         filePath: 'src/profile-lambda.ts',
         ruleId: 'http-handlers',
-        severity: 'warning',
+        impact: 'medium',
         framework: 'aws-lambda',
       },
     ],
@@ -437,21 +437,21 @@ export default {
   assert.deepEqual(
     report.findings.map((f) => ({
       ruleId: f.ruleId,
-      severity: f.severity,
+      impact: f.impact,
       symbolName: f.symbolName,
       framework: f.framework,
     })),
     [
       {
-        ruleId: 'http-handlers',
-        severity: 'warning',
-        symbolName: 'cloudflare.fetch',
+        ruleId: 'queue-consumers',
+        impact: 'high',
+        symbolName: 'cloudflare.queue',
         framework: 'cloudflare-workers',
       },
       {
-        ruleId: 'queue-consumers',
-        severity: 'error',
-        symbolName: 'cloudflare.queue',
+        ruleId: 'http-handlers',
+        impact: 'medium',
+        symbolName: 'cloudflare.fetch',
         framework: 'cloudflare-workers',
       },
     ],
@@ -581,17 +581,22 @@ async function run(userId: string, orderId: string) {
 
   assert.equal(report.findings.length, 7);
   assert.ok(report.findings.every((f) => f.ruleId === 'otel-naming'));
-  assert.ok(report.findings.every((f) => f.severity === 'warning'));
+  assert.equal(report.highImpactCount, 2);
+  assert.equal(report.lowImpactCount, 5);
   assert.ok(
-    report.findings[0]?.message.includes('span.setAttribute') &&
+    report.findings[0]?.impact === 'high' &&
+      report.findings[0]?.message.includes('span.setAttribute') &&
       report.findings[0]?.suggestion.includes('span.setAttribute'),
   );
-  assert.ok(report.findings[1]?.message.includes('high-cardinality'));
-  assert.ok(report.findings[2]?.message.includes('empty'));
-  assert.ok(report.findings[3]?.message.includes('empty'));
-  assert.ok(report.findings[4]?.message.includes('generic'));
-  assert.ok(report.findings[5]?.message.includes('generic'));
-  assert.ok(report.findings[6]?.message.includes('generic'));
+  assert.ok(
+    report.findings[1]?.impact === 'high' &&
+      report.findings[1]?.message.includes('high-cardinality'),
+  );
+  assert.ok(report.findings[2]?.impact === 'low' && report.findings[2]?.message.includes('empty'));
+  assert.ok(report.findings[3]?.impact === 'low' && report.findings[3]?.message.includes('empty'));
+  assert.ok(report.findings[4]?.impact === 'low' && report.findings[4]?.message.includes('generic'));
+  assert.ok(report.findings[5]?.impact === 'low' && report.findings[5]?.message.includes('generic'));
+  assert.ok(report.findings[6]?.impact === 'low' && report.findings[6]?.message.includes('generic'));
 
   const scopedUntouched = analyzeTargets(
     [
@@ -836,8 +841,8 @@ agenda.define('nightly-reconcile', async (job: any) => {
   assert.equal(report.checkedUnits, 5);
   assert.equal(report.passedUnits, 1);
   assert.equal(report.coveragePercent, 20);
-  assert.equal(report.errorsCount, 1);
-  assert.equal(report.warningsCount, 3);
+  assert.equal(report.highImpactCount, 1);
+  assert.equal(report.mediumImpactCount, 3);
   assert.deepEqual(
     report.findings.map((f) => ({
       ruleId: f.ruleId,
@@ -845,6 +850,11 @@ agenda.define('nightly-reconcile', async (job: any) => {
       symbolName: f.symbolName,
     })),
     [
+      {
+        ruleId: 'queue-consumers',
+        framework: 'agenda',
+        symbolName: 'agenda.define(nightly-reconcile)',
+      },
       {
         ruleId: 'http-handlers',
         framework: 'nextjs-server-action',
@@ -859,11 +869,6 @@ agenda.define('nightly-reconcile', async (job: any) => {
         ruleId: 'http-handlers',
         framework: 'hapi',
         symbolName: 'POST /v1/payouts',
-      },
-      {
-        ruleId: 'queue-consumers',
-        framework: 'agenda',
-        symbolName: 'agenda.define(nightly-reconcile)',
       },
     ],
   );
@@ -981,7 +986,7 @@ export async function onRequestGet({ request, env, waitUntil }: any) {
     DEFAULT_CONFIG,
   );
 
-  assert.equal(report.errorsCount, 0);
+  assert.equal(report.highImpactCount, 0);
   assert.deepEqual(
     report.findings.map((f) => ({
       filePath: f.filePath,
@@ -1015,4 +1020,53 @@ async function run(id: string) {
   const md = formatPrComment(report);
   assert.ok(md.includes('`` `refund-${id}` ``'));
   assert.ok(md.includes('(``startActiveSpan(`refund-${id}`)``)'));
+});
+
+test('metric-cardinality flags unbounded OTel and prom-client labels while skipping bounded metrics and non-metric receivers', () => {
+  const code = `
+const httpCounter = new Counter({
+  name: 'http_requests_total',
+  help: 'Total HTTP requests',
+  labelNames: ['method', 'user_id', 'email'],
+});
+
+const safeCounter = new Counter({
+  name: 'safe_requests_total',
+  help: 'Bounded requests',
+  labelNames: ['method', 'status_code'],
+});
+
+function recordMetrics(req: any, err: Error, userId: string) {
+  ordersCounter.add(1, { user_id: userId, status: 'ok' });
+  latencyHistogram.record(42, { route: req.originalUrl, reason: err.message });
+  httpCounter.inc({ requestId: req.id, method: 'POST' });
+
+  ordersCounter.add(1, { status: 'ok', region: 'eu' });
+  safeCounter.inc({ method: 'GET', status_code: '200' });
+  emailQueue.add('send-welcome', { userId, email: 'a@b.com' });
+  cookieStore.set({ userId });
+
+  // telemetry-prs-ignore: metric-cardinality
+  ordersCounter.add(1, { orderId: 'debug-override' });
+}
+`;
+
+  const report = analyzeTargets(
+    [{ filePath: 'src/metrics.ts', content: code }],
+    DEFAULT_CONFIG,
+  );
+
+  assert.equal(report.findings.length, 4);
+  assert.equal(report.highImpactCount, 4);
+  assert.ok(report.findings.every((f) => f.ruleId === 'metric-cardinality' && f.impact === 'high'));
+  assert.deepEqual(
+    report.findings.map((f) => f.symbolName),
+    ['new Counter', 'ordersCounter.add', 'latencyHistogram.record', 'httpCounter.inc'],
+  );
+  assert.ok(report.findings[0]?.message.includes('`user_id`'));
+  assert.ok(report.findings[0]?.message.includes('`email`'));
+  assert.ok(report.findings[1]?.message.includes('`user_id`'));
+  assert.ok(report.findings[2]?.message.includes('`req.originalUrl`'));
+  assert.ok(report.findings[2]?.message.includes('`err.message`'));
+  assert.ok(report.findings[3]?.message.includes('`requestId`'));
 });

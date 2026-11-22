@@ -4,7 +4,11 @@ import path from 'node:path';
 import * as core from '@actions/core';
 import * as github from '@actions/github';
 import { analyzeDiffFiles } from './analyzer/index.ts';
-import { loadConfig } from './config.ts';
+import {
+  loadConfig,
+  resolveBlockOn,
+  shouldBlockOnImpact,
+} from './config.ts';
 import { parsePatchAddedLines, parseUnifiedDiff } from './diff.ts';
 import {
   formatPrComment,
@@ -12,7 +16,7 @@ import {
   REPORT_MARKER,
 } from './reporter/markdown.ts';
 import { formatSarifReport } from './reporter/sarif.ts';
-import type { CheckMode, DiffFile } from './types.ts';
+import type { DiffFile } from './types.ts';
 
 async function getPrDiffFiles(
   octokit: ReturnType<typeof github.getOctokit>,
@@ -52,7 +56,9 @@ function isGitHubPermissionError(error: unknown): boolean {
     return true;
   }
   const message =
-    error instanceof Error ? error.message : String((error as { message?: unknown }).message ?? '');
+    error instanceof Error
+      ? error.message
+      : String((error as { message?: unknown }).message ?? '');
   return /resource not accessible by integration|forbidden/i.test(message);
 }
 
@@ -144,16 +150,19 @@ async function run(): Promise<void> {
   try {
     const cwd = process.cwd();
     const configPath = core.getInput('config') || '.telemetry-prs.yml';
-    const modeOverride = core.getInput('mode') as CheckMode | '';
+    const blockOnInput = core.getInput('block-on');
+    const modeOverride = core.getInput('mode');
     const token = core.getInput('github-token');
     const commentOnPr = core.getInput('comment-on-pr') !== 'false';
     const annotate = core.getInput('annotate') === 'true';
     const sarifFile = core.getInput('sarif-file');
 
     const config = loadConfig(cwd, configPath);
-    if (modeOverride === 'comment' || modeOverride === 'fail') {
-      config.mode = modeOverride;
-    }
+    config.blockOn = resolveBlockOn(
+      blockOnInput || undefined,
+      modeOverride || undefined,
+      config.blockOn,
+    );
 
     const pr = github.context.payload.pull_request;
     let diffFiles: DiffFile[];
@@ -173,8 +182,9 @@ async function run(): Promise<void> {
     const report = analyzeDiffFiles(cwd, diffFiles, config);
 
     core.setOutput('findings-count', String(report.findings.length));
-    core.setOutput('errors-count', String(report.errorsCount));
-    core.setOutput('warnings-count', String(report.warningsCount));
+    core.setOutput('high-impact-count', String(report.highImpactCount));
+    core.setOutput('medium-impact-count', String(report.mediumImpactCount));
+    core.setOutput('low-impact-count', String(report.lowImpactCount));
     core.setOutput('coverage-percent', String(report.coveragePercent));
 
     if (sarifFile) {
@@ -186,16 +196,18 @@ async function run(): Promise<void> {
     if (annotate) {
       for (const f of report.findings) {
         const props = {
-          title: `Telemetry PRs (${f.ruleId})`,
+          title: `Telemetry PRs (${f.ruleId} · ${f.impact} impact)`,
           file: f.filePath,
           startLine: f.line,
           endLine: f.endLine,
         };
         const msg = `${f.message} ${f.suggestion}`;
-        if (f.severity === 'error') {
+        if (f.impact === 'high') {
           core.error(msg, props);
-        } else {
+        } else if (f.impact === 'medium') {
           core.warning(msg, props);
+        } else {
+          core.notice(msg, props);
         }
       }
     }
@@ -225,9 +237,9 @@ async function run(): Promise<void> {
       }
     }
 
-    if (config.mode === 'fail' && report.errorsCount > 0) {
+    if (shouldBlockOnImpact(report, config.blockOn)) {
       core.setFailed(
-        `Telemetry PRs found ${report.errorsCount} error-severity instrumentation gap(s).`,
+        `Telemetry PRs blocked on ${config.blockOn}-impact threshold (${report.highImpactCount} high, ${report.mediumImpactCount} medium, ${report.lowImpactCount} low impact).`,
       );
     }
   } catch (error) {

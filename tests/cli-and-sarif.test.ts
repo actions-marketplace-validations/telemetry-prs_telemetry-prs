@@ -30,7 +30,7 @@ new Worker('emails', async (job) => {
 
   assert.equal(sarif.version, '2.1.0');
   assert.equal(sarif.runs.length, 1);
-  assert.equal(sarif.runs[0]?.tool.driver.rules.length, 4);
+  assert.equal(sarif.runs[0]?.tool.driver.rules.length, 5);
   assert.equal(sarif.runs[0]?.results.length, 1);
   assert.equal(sarif.runs[0]?.results[0]?.ruleId, 'queue-consumers');
   assert.equal(sarif.runs[0]?.results[0]?.level, 'error');
@@ -40,24 +40,36 @@ new Worker('emails', async (job) => {
   );
 });
 
-test('loadConfig merges YAML overrides and rejects invalid version or mode', () => {
+test('loadConfig merges impact tiers, legacy mode/severity aliases, and rejects invalid values', () => {
   const dir = makeTempDir('telemetry-prs-cfg-');
   try {
     fs.writeFileSync(
       path.join(dir, '.telemetry-prs.yml'),
-      'version: 1\nmode: fail\nrules:\n  http-handlers:\n    severity: error\n',
+      'version: 1\nblockOn: medium\nrules:\n  http-handlers:\n    impact: high\n',
       'utf8',
     );
     const loaded = loadConfig(dir);
-    assert.equal(loaded.mode, 'fail');
-    assert.equal(loaded.rules['http-handlers'].severity, 'error');
-    assert.equal(loaded.rules['queue-consumers'].severity, 'error');
+    assert.equal(loaded.blockOn, 'medium');
+    assert.equal(loaded.rules['http-handlers'].impact, 'high');
+    assert.equal(loaded.rules['queue-consumers'].impact, 'high');
+
+    fs.writeFileSync(
+      path.join(dir, 'legacy.yml'),
+      'version: 1\nmode: fail\nrules:\n  http-handlers:\n    severity: error\n',
+      'utf8',
+    );
+    const legacy = loadConfig(dir, 'legacy.yml');
+    assert.equal(legacy.blockOn, 'high');
+    assert.equal(legacy.rules['http-handlers'].impact, 'high');
 
     fs.writeFileSync(path.join(dir, 'bad-ver.yml'), 'version: 2\n', 'utf8');
     assert.throws(() => loadConfig(dir, 'bad-ver.yml'), /Unsupported/);
 
     fs.writeFileSync(path.join(dir, 'bad-mode.yml'), 'mode: strict\n', 'utf8');
     assert.throws(() => loadConfig(dir, 'bad-mode.yml'), /Invalid mode/);
+
+    fs.writeFileSync(path.join(dir, 'bad-block.yml'), 'blockOn: critical\n', 'utf8');
+    assert.throws(() => loadConfig(dir, 'bad-block.yml'), /Invalid blockOn/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -139,11 +151,18 @@ test('CLI check runs end-to-end on a git diff and respects --mode fail and --for
 
     const failRun = spawnSync(
       process.execPath,
-      [cliPath, 'check', '--base', 'HEAD~1', '--mode', 'fail'],
+      [cliPath, 'check', '--base', 'HEAD~1', '--block-on', 'high'],
       { cwd: dir, encoding: 'utf8' },
     );
     assert.equal(failRun.status, 1);
     assert.ok(failRun.stdout.includes('Worker(payouts)'));
+
+    const legacyFailRun = spawnSync(
+      process.execPath,
+      [cliPath, 'check', '--base', 'HEAD~1', '--mode', 'fail'],
+      { cwd: dir, encoding: 'utf8' },
+    );
+    assert.equal(legacyFailRun.status, 1);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

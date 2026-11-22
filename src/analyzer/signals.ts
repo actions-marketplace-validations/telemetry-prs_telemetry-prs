@@ -104,7 +104,7 @@ function matchesAnyPattern(
   return false;
 }
 
-function isNonMetricReceiver(receiverText: string): boolean {
+export function isNonMetricReceiver(receiverText: string): boolean {
   const cleaned = receiverText.replace(/\?\.|!/g, '.').trim();
   const lastSegment = cleaned.split('.').pop() ?? cleaned;
   return (

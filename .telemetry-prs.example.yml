@@ -1,6 +1,6 @@
 version: 1
 
-mode: comment
+blockOn: none
 
 include:
   - "src/**/*.{ts,js,mts,cts,mjs,cjs}"
@@ -57,17 +57,14 @@ telemetry:
     - "request.log."
 
 rules:
-  http-handlers:
+  metric-cardinality:
     enabled: true
-    severity: warning
-    require: [span, metric]
-    matchMode: any
-    minLines: 4
-    description: "HTTP route handlers should emit a custom span or business metric"
+    impact: high
+    description: "Metric labels and attributes must stay low-cardinality to prevent TSDB and billing explosions"
 
   queue-consumers:
     enabled: true
-    severity: error
+    impact: high
     require: [span, metric]
     matchMode: any
     minLines: 3
@@ -75,13 +72,21 @@ rules:
 
   error-swallowing:
     enabled: true
-    severity: warning
+    impact: medium
     require: [span-error, log, metric]
     matchMode: any
     minLines: 1
     description: "Catch blocks that do not rethrow should record an exception, log, or increment an error metric"
 
+  http-handlers:
+    enabled: true
+    impact: medium
+    require: [span, metric]
+    matchMode: any
+    minLines: 4
+    description: "HTTP route handlers should emit a custom span or business metric"
+
   otel-naming:
     enabled: true
-    severity: warning
+    impact: low
     description: "OpenTelemetry span names should be static, low-cardinality, and descriptive"

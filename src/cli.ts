@@ -7,7 +7,11 @@ import {
   analyzeTargets,
   shouldCheckFile,
 } from './analyzer/index.ts';
-import { loadConfig } from './config.ts';
+import {
+  loadConfig,
+  resolveBlockOn,
+  shouldBlockOnImpact,
+} from './config.ts';
 import { parseUnifiedDiff } from './diff.ts';
 import { runInit } from './init.ts';
 import { detectRepoTelemetry } from './repo-telemetry.ts';
@@ -16,12 +20,12 @@ import {
   formatTerminalReport,
 } from './reporter/markdown.ts';
 import { formatSarifReport } from './reporter/sarif.ts';
-import type { CheckMode, TelemetryConfig } from './types.ts';
+import type { TelemetryConfig } from './types.ts';
 
 function printUsage(): void {
   console.log(`Usage:
-  telemetry-prs check [--base <ref>] [--config <path>] [--mode comment|fail] [--format text|markdown|json|sarif]
-  telemetry-prs scan <dir-or-file> [--config <path>] [--mode comment|fail] [--format text|markdown|json|sarif]
+  telemetry-prs check [--base <ref>] [--config <path>] [--block-on none|high|medium|low] [--format text|markdown|json|sarif]
+  telemetry-prs scan <dir-or-file> [--config <path>] [--block-on none|high|medium|low] [--format text|markdown|json|sarif]
   telemetry-prs init [--workflow] [--force]
 
 Commands:
@@ -111,13 +115,12 @@ function main(): void {
   }
 
   const configPath = parseFlag(args, '--config') ?? '.telemetry-prs.yml';
-  const modeOverride = parseFlag(args, '--mode') as CheckMode | undefined;
+  const blockOnOverride = parseFlag(args, '--block-on');
+  const modeOverride = parseFlag(args, '--mode');
   const format = parseFlag(args, '--format') ?? 'text';
 
   const config = loadConfig(cwd, configPath);
-  if (modeOverride === 'comment' || modeOverride === 'fail') {
-    config.mode = modeOverride;
-  }
+  config.blockOn = resolveBlockOn(blockOnOverride, modeOverride, config.blockOn);
 
   let report;
 
@@ -166,7 +169,7 @@ function main(): void {
     console.log(formatTerminalReport(report));
   }
 
-  if (config.mode === 'fail' && report.errorsCount > 0) {
+  if (shouldBlockOnImpact(report, config.blockOn)) {
     process.exit(1);
   }
 }

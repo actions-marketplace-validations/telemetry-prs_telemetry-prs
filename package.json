@@ -1,6 +1,6 @@
 {
   "name": "telemetry-prs",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Catch missing OpenTelemetry instrumentation in TypeScript/Node.js pull requests — fast, static, vendor-neutral, and 100% inside your CI.",
   "license": "MIT",

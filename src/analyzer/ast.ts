@@ -7,6 +7,7 @@ import {
   hasIgnoreDirective,
   isBenignProbeTryCatch,
   isErrorReporterGuardTryCatch,
+  isNonMetricReceiver,
 } from './signals.ts';
 
 const HTTP_METHODS = new Set([
@@ -72,6 +73,88 @@ const GENERIC_SPAN_NAMES = new Set([
   'span',
   'default',
 ]);
+
+const OTEL_METRIC_VALUE_ATTR_METHODS = new Set(['add', 'record']);
+const PROM_METRIC_ATTR_METHODS = new Set(['inc', 'dec', 'observe', 'set', 'labels']);
+const PROM_METRIC_CTORS = new Set(['Counter', 'Histogram', 'Gauge', 'Summary']);
+
+const HIGH_CARDINALITY_LABEL_KEY_RE =
+  /^(?:id|uuid|guid|email|useremail|ip|clientip|ipaddress|remoteaddr|url|rawurl|fullurl|token|accesstoken|timestamp|createdat|errormessage|errmessage|stack|stacktrace|(?:user|customer|account|order|request|trace|span|session|correlation|job|invoice|payment|transaction|entity|record|item|member|org|organization|tenant)id)$/i;
+
+const HIGH_CARDINALITY_VALUE_RE =
+  /\b(?:req|request)\.(?:url|originalUrl|path)\b|\b(?:err|error)\.(?:message|stack)\b|\bDate\.now\s*\(|\bnew\s+Date\s*\(|\b(?:crypto\.)?randomUUID\s*\(|\buuid(?:v[147])?\s*\(|\bMath\.random\s*\(/;
+
+function normalizeMetricLabelKey(raw: string): string {
+  return raw.replace(/[._\-\s]/g, '').toLowerCase();
+}
+
+function isHighCardinalityLabelKey(raw: string): boolean {
+  return HIGH_CARDINALITY_LABEL_KEY_RE.test(normalizeMetricLabelKey(raw));
+}
+
+function inspectMetricAttributesObject(
+  sourceFile: ts.SourceFile,
+  obj: ts.ObjectLiteralExpression,
+): { labels: string[]; values: string[] } {
+  const labels = new Set<string>();
+  const values = new Set<string>();
+
+  for (const prop of obj.properties) {
+    if (ts.isShorthandPropertyAssignment(prop)) {
+      const key = prop.name.text;
+      if (isHighCardinalityLabelKey(key)) {
+        labels.add(key);
+      }
+      continue;
+    }
+    if (!ts.isPropertyAssignment(prop)) {
+      continue;
+    }
+    const key = prop.name.getText(sourceFile).replace(/^['"]|['"]$/g, '');
+    if (key && isHighCardinalityLabelKey(key)) {
+      labels.add(key);
+    }
+    const valText = prop.initializer.getText(sourceFile);
+    if (
+      HIGH_CARDINALITY_VALUE_RE.test(valText) ||
+      ts.isTemplateExpression(unwrapExpression(prop.initializer))
+    ) {
+      values.add(valText);
+    }
+  }
+
+  return {
+    labels: Array.from(labels),
+    values: Array.from(values),
+  };
+}
+
+function inspectPromLabelNames(
+  sourceFile: ts.SourceFile,
+  obj: ts.ObjectLiteralExpression,
+): string[] {
+  const flagged = new Set<string>();
+  for (const prop of obj.properties) {
+    if (!ts.isPropertyAssignment(prop)) {
+      continue;
+    }
+    const name = prop.name.getText(sourceFile).replace(/^['"]|['"]$/g, '');
+    if (name !== 'labelNames') {
+      continue;
+    }
+    const init = unwrapExpression(prop.initializer);
+    if (!ts.isArrayLiteralExpression(init)) {
+      continue;
+    }
+    for (const el of init.elements) {
+      const label = getStringLiteralText(el);
+      if (label && isHighCardinalityLabelKey(label)) {
+        flagged.add(label);
+      }
+    }
+  }
+  return Array.from(flagged);
+}
 
 function getScriptKind(filePath: string): ts.ScriptKind {
   const ext = path.extname(filePath).toLowerCase();
@@ -1171,6 +1254,99 @@ export function extractCodeUnits(
           spanNameIssue: issue,
           spanNameRaw: raw,
         });
+      }
+
+      if (ts.isPropertyAccessExpression(node.expression)) {
+        const methodName = node.expression.name.text;
+        const receiverText = node.expression.expression.getText(sourceFile);
+
+        if (!isNonMetricReceiver(receiverText)) {
+          let attrObj: ts.ObjectLiteralExpression | null = null;
+          let framework = 'opentelemetry';
+
+          if (
+            OTEL_METRIC_VALUE_ATTR_METHODS.has(methodName) &&
+            node.arguments.length >= 2 &&
+            getStringLiteralText(node.arguments[0]) === null
+          ) {
+            const candidate = unwrapExpression(node.arguments[1]!);
+            if (ts.isObjectLiteralExpression(candidate)) {
+              attrObj = candidate;
+              framework = 'opentelemetry';
+            }
+          } else if (
+            PROM_METRIC_ATTR_METHODS.has(methodName) &&
+            node.arguments.length >= 1
+          ) {
+            const candidate = unwrapExpression(node.arguments[0]!);
+            if (ts.isObjectLiteralExpression(candidate)) {
+              attrObj = candidate;
+              framework = 'prom-client';
+            }
+          }
+
+          if (attrObj) {
+            const { labels, values } = inspectMetricAttributesObject(
+              sourceFile,
+              attrObj,
+            );
+            if (labels.length > 0 || values.length > 0) {
+              const { startLine, endLine } = getLineRange(sourceFile, node);
+              const anchorNodes = [node, attrObj, findEnclosingStatement(node)];
+              const ignored = hasIgnoreDirective(
+                sourceFile,
+                anchorNodes,
+                'metric-cardinality',
+              );
+              units.push({
+                ruleId: 'metric-cardinality',
+                kind: 'metric-cardinality',
+                symbolName: `${receiverText}.${methodName}`,
+                framework,
+                startLine,
+                endLine,
+                lineCount: Math.max(1, endLine - startLine + 1),
+                ignored,
+                foundSignals: [],
+                cardinalityLabels: labels,
+                cardinalityValues: values,
+              });
+            }
+          }
+        }
+      }
+    }
+
+    if (ts.isNewExpression(node) && node.arguments && node.arguments.length === 1) {
+      const ctorName = node.expression.getText(sourceFile);
+      const shortCtor = ctorName.split('.').pop() ?? ctorName;
+      if (PROM_METRIC_CTORS.has(shortCtor)) {
+        const configArg = unwrapExpression(node.arguments[0]!);
+        if (ts.isObjectLiteralExpression(configArg)) {
+          const flaggedLabels = inspectPromLabelNames(sourceFile, configArg);
+          if (flaggedLabels.length > 0) {
+            const { startLine, endLine } = getLineRange(sourceFile, node);
+            const anchorNodes = [node, configArg, findEnclosingStatement(node)];
+            const ignored = hasIgnoreDirective(
+              sourceFile,
+              anchorNodes,
+              'metric-cardinality',
+            );
+            units.push({
+              ruleId: 'metric-cardinality',
+              kind: 'metric-cardinality',
+              symbolName: `new ${shortCtor}`,
+              framework: 'prom-client',
+              startLine,
+              endLine,
+              lineCount: Math.max(1, endLine - startLine + 1),
+              ignored,
+              foundSignals: [],
+              cardinalityLabels: flaggedLabels,
+              cardinalityValues: [],
+            });
+          }
+        }
       }
     }
 

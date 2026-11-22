@@ -19739,10 +19739,10 @@ Support boolean input list: \`true | True | TRUE | false | False | FALSE\``);
       (0, command_1.issueCommand)("warning", (0, utils_1.toCommandProperties)(properties), message instanceof Error ? message.toString() : message);
     }
     exports2.warning = warning2;
-    function notice(message, properties = {}) {
+    function notice2(message, properties = {}) {
       (0, command_1.issueCommand)("notice", (0, utils_1.toCommandProperties)(properties), message instanceof Error ? message.toString() : message);
     }
-    exports2.notice = notice;
+    exports2.notice = notice2;
     function info(message) {
       process.stdout.write(message + os.EOL);
     }
@@ -244419,6 +244419,68 @@ var GENERIC_SPAN_NAMES = /* @__PURE__ */ new Set([
   "span",
   "default"
 ]);
+var OTEL_METRIC_VALUE_ATTR_METHODS = /* @__PURE__ */ new Set(["add", "record"]);
+var PROM_METRIC_ATTR_METHODS = /* @__PURE__ */ new Set(["inc", "dec", "observe", "set", "labels"]);
+var PROM_METRIC_CTORS = /* @__PURE__ */ new Set(["Counter", "Histogram", "Gauge", "Summary"]);
+var HIGH_CARDINALITY_LABEL_KEY_RE = /^(?:id|uuid|guid|email|useremail|ip|clientip|ipaddress|remoteaddr|url|rawurl|fullurl|token|accesstoken|timestamp|createdat|errormessage|errmessage|stack|stacktrace|(?:user|customer|account|order|request|trace|span|session|correlation|job|invoice|payment|transaction|entity|record|item|member|org|organization|tenant)id)$/i;
+var HIGH_CARDINALITY_VALUE_RE = /\b(?:req|request)\.(?:url|originalUrl|path)\b|\b(?:err|error)\.(?:message|stack)\b|\bDate\.now\s*\(|\bnew\s+Date\s*\(|\b(?:crypto\.)?randomUUID\s*\(|\buuid(?:v[147])?\s*\(|\bMath\.random\s*\(/;
+function normalizeMetricLabelKey(raw) {
+  return raw.replace(/[._\-\s]/g, "").toLowerCase();
+}
+function isHighCardinalityLabelKey(raw) {
+  return HIGH_CARDINALITY_LABEL_KEY_RE.test(normalizeMetricLabelKey(raw));
+}
+function inspectMetricAttributesObject(sourceFile, obj) {
+  const labels = /* @__PURE__ */ new Set();
+  const values = /* @__PURE__ */ new Set();
+  for (const prop of obj.properties) {
+    if (import_typescript2.default.isShorthandPropertyAssignment(prop)) {
+      const key2 = prop.name.text;
+      if (isHighCardinalityLabelKey(key2)) {
+        labels.add(key2);
+      }
+      continue;
+    }
+    if (!import_typescript2.default.isPropertyAssignment(prop)) {
+      continue;
+    }
+    const key = prop.name.getText(sourceFile).replace(/^['"]|['"]$/g, "");
+    if (key && isHighCardinalityLabelKey(key)) {
+      labels.add(key);
+    }
+    const valText = prop.initializer.getText(sourceFile);
+    if (HIGH_CARDINALITY_VALUE_RE.test(valText) || import_typescript2.default.isTemplateExpression(unwrapExpression(prop.initializer))) {
+      values.add(valText);
+    }
+  }
+  return {
+    labels: Array.from(labels),
+    values: Array.from(values)
+  };
+}
+function inspectPromLabelNames(sourceFile, obj) {
+  const flagged = /* @__PURE__ */ new Set();
+  for (const prop of obj.properties) {
+    if (!import_typescript2.default.isPropertyAssignment(prop)) {
+      continue;
+    }
+    const name = prop.name.getText(sourceFile).replace(/^['"]|['"]$/g, "");
+    if (name !== "labelNames") {
+      continue;
+    }
+    const init = unwrapExpression(prop.initializer);
+    if (!import_typescript2.default.isArrayLiteralExpression(init)) {
+      continue;
+    }
+    for (const el of init.elements) {
+      const label = getStringLiteralText(el);
+      if (label && isHighCardinalityLabelKey(label)) {
+        flagged.add(label);
+      }
+    }
+  }
+  return Array.from(flagged);
+}
 function getScriptKind(filePath) {
   const ext2 = import_node_path2.default.extname(filePath).toLowerCase();
   switch (ext2) {
@@ -245349,6 +245411,87 @@ function extractCodeUnits(filePath, sourceText, patterns) {
           spanNameRaw: raw
         });
       }
+      if (import_typescript2.default.isPropertyAccessExpression(node.expression)) {
+        const methodName = node.expression.name.text;
+        const receiverText = node.expression.expression.getText(sourceFile);
+        if (!isNonMetricReceiver(receiverText)) {
+          let attrObj = null;
+          let framework = "opentelemetry";
+          if (OTEL_METRIC_VALUE_ATTR_METHODS.has(methodName) && node.arguments.length >= 2 && getStringLiteralText(node.arguments[0]) === null) {
+            const candidate = unwrapExpression(node.arguments[1]);
+            if (import_typescript2.default.isObjectLiteralExpression(candidate)) {
+              attrObj = candidate;
+              framework = "opentelemetry";
+            }
+          } else if (PROM_METRIC_ATTR_METHODS.has(methodName) && node.arguments.length >= 1) {
+            const candidate = unwrapExpression(node.arguments[0]);
+            if (import_typescript2.default.isObjectLiteralExpression(candidate)) {
+              attrObj = candidate;
+              framework = "prom-client";
+            }
+          }
+          if (attrObj) {
+            const { labels, values } = inspectMetricAttributesObject(
+              sourceFile,
+              attrObj
+            );
+            if (labels.length > 0 || values.length > 0) {
+              const { startLine, endLine } = getLineRange(sourceFile, node);
+              const anchorNodes = [node, attrObj, findEnclosingStatement(node)];
+              const ignored = hasIgnoreDirective(
+                sourceFile,
+                anchorNodes,
+                "metric-cardinality"
+              );
+              units.push({
+                ruleId: "metric-cardinality",
+                kind: "metric-cardinality",
+                symbolName: `${receiverText}.${methodName}`,
+                framework,
+                startLine,
+                endLine,
+                lineCount: Math.max(1, endLine - startLine + 1),
+                ignored,
+                foundSignals: [],
+                cardinalityLabels: labels,
+                cardinalityValues: values
+              });
+            }
+          }
+        }
+      }
+    }
+    if (import_typescript2.default.isNewExpression(node) && node.arguments && node.arguments.length === 1) {
+      const ctorName = node.expression.getText(sourceFile);
+      const shortCtor = ctorName.split(".").pop() ?? ctorName;
+      if (PROM_METRIC_CTORS.has(shortCtor)) {
+        const configArg = unwrapExpression(node.arguments[0]);
+        if (import_typescript2.default.isObjectLiteralExpression(configArg)) {
+          const flaggedLabels = inspectPromLabelNames(sourceFile, configArg);
+          if (flaggedLabels.length > 0) {
+            const { startLine, endLine } = getLineRange(sourceFile, node);
+            const anchorNodes = [node, configArg, findEnclosingStatement(node)];
+            const ignored = hasIgnoreDirective(
+              sourceFile,
+              anchorNodes,
+              "metric-cardinality"
+            );
+            units.push({
+              ruleId: "metric-cardinality",
+              kind: "metric-cardinality",
+              symbolName: `new ${shortCtor}`,
+              framework: "prom-client",
+              startLine,
+              endLine,
+              lineCount: Math.max(1, endLine - startLine + 1),
+              ignored,
+              foundSignals: [],
+              cardinalityLabels: flaggedLabels,
+              cardinalityValues: []
+            });
+          }
+        }
+      }
     }
     import_typescript2.default.forEachChild(node, visit);
   };
@@ -245382,6 +245525,13 @@ function evaluateSignals(found, rule) {
     missing: hasAny ? [] : rule.require
   };
 }
+function inlineCode(text) {
+  if (!text.includes("`")) {
+    return `\`${text}\``;
+  }
+  const pad = text.startsWith("`") || text.endsWith("`") ? " " : "";
+  return `\`\`${pad}${text}${pad}\`\``;
+}
 function buildSuggestion(unit) {
   switch (unit.kind) {
     case "http-handler":
@@ -245390,6 +245540,8 @@ function buildSuggestion(unit) {
       return `Start a span per job/message (\`tracer.startActiveSpan('${unit.symbolName}', async (span) => { ... })\`) and record job outcome metrics.`;
     case "catch-block":
       return `Call \`span.recordException(err)\`, emit a structured error log (\`logger.error({ err }, '...')\`), increment an error counter, or rethrow.`;
+    case "metric-cardinality":
+      return `Remove unbounded identifiers from metric labels (keep them on trace spans or structured logs instead), use parameterized route templates (\`http.route\` / \`req.route.path\`), and pair with OpenTelemetry SDK Views or Collector attribute filters for runtime protection.`;
     case "span-name":
       switch (unit.spanNameIssue) {
         case "high-cardinality":
@@ -245397,7 +245549,7 @@ function buildSuggestion(unit) {
         case "empty-name":
           return `Provide a non-empty, descriptive static OpenTelemetry span name (e.g. \`'service.operation'\`).`;
         case "generic-name":
-          return `Replace generic span name ${unit.spanNameRaw ? `\`${unit.spanNameRaw}\`` : ""} with a descriptive \`<domain>.<action>\` name (e.g. \`'checkout.charge_card'\`).`;
+          return `Replace generic span name ${unit.spanNameRaw ? inlineCode(unit.spanNameRaw) : ""} with a descriptive \`<domain>.<action>\` name (e.g. \`'checkout.charge_card'\`).`;
         default:
           return `Use a static, descriptive OpenTelemetry span name.`;
       }
@@ -245408,13 +245560,6 @@ function formatList(items, conjunction) {
   if (items.length === 2) return `${items[0]} ${conjunction} ${items[1]}`;
   return `${items.slice(0, -1).join(", ")}, ${conjunction} ${items[items.length - 1]}`;
 }
-function inlineCode(text) {
-  if (!text.includes("`")) {
-    return `\`${text}\``;
-  }
-  const pad = text.startsWith("`") || text.endsWith("`") ? " " : "";
-  return `\`\`${pad}${text}${pad}\`\``;
-}
 function buildMessage(unit, rule, missing) {
   const needText = formatList(missing, rule.matchMode === "all" ? "and" : "or");
   switch (unit.kind) {
@@ -245424,6 +245569,21 @@ function buildMessage(unit, rule, missing) {
       return `Background worker ${inlineCode(unit.symbolName)} has no ${needText} instrumentation.`;
     case "catch-block":
       return `Catch block ${inlineCode(unit.symbolName)} swallows errors without ${needText}.`;
+    case "metric-cardinality": {
+      const parts = [];
+      if (unit.cardinalityLabels && unit.cardinalityLabels.length > 0) {
+        parts.push(
+          `unbounded label key${unit.cardinalityLabels.length === 1 ? "" : "s"} ${formatList(unit.cardinalityLabels.map(inlineCode), "and")}`
+        );
+      }
+      if (unit.cardinalityValues && unit.cardinalityValues.length > 0) {
+        parts.push(
+          `dynamic value${unit.cardinalityValues.length === 1 ? "" : "s"} ${formatList(unit.cardinalityValues.map(inlineCode), "and")}`
+        );
+      }
+      const detail = parts.length > 0 ? parts.join(" and ") : "high-cardinality attributes";
+      return `Metric call ${inlineCode(unit.symbolName)} uses ${detail}, which can explode active time series and monitoring costs.`;
+    }
     case "span-name":
       switch (unit.spanNameIssue) {
         case "high-cardinality":
@@ -245437,6 +245597,17 @@ function buildMessage(unit, rule, missing) {
       }
   }
 }
+function resolveFindingImpact(unit, rule) {
+  if (unit.kind === "span-name" && unit.spanNameIssue === "high-cardinality") {
+    return "high";
+  }
+  return rule.impact;
+}
+var IMPACT_ORDER = {
+  high: 0,
+  medium: 1,
+  low: 2
+};
 function analyzeTargets(targets, config) {
   const findings = [];
   let checkedFiles = 0;
@@ -245475,7 +245646,7 @@ function analyzeTargets(targets, config) {
             line: unit.startLine,
             endLine: unit.endLine,
             ruleId: unit.ruleId,
-            severity: rule.severity,
+            impact: resolveFindingImpact(unit, rule),
             kind: unit.kind,
             symbolName: unit.symbolName,
             framework: unit.framework,
@@ -245489,6 +245660,25 @@ function analyzeTargets(targets, config) {
         }
         continue;
       }
+      if (unit.kind === "metric-cardinality") {
+        findings.push({
+          filePath: target.filePath.replace(/\\/g, "/"),
+          line: unit.startLine,
+          endLine: unit.endLine,
+          ruleId: unit.ruleId,
+          impact: resolveFindingImpact(unit, rule),
+          kind: unit.kind,
+          symbolName: unit.symbolName,
+          framework: unit.framework,
+          requiredSignals: [],
+          matchMode: rule.matchMode,
+          foundSignals: [],
+          missingSignals: [],
+          message: buildMessage(unit, rule, []),
+          suggestion: buildSuggestion(unit)
+        });
+        continue;
+      }
       checkedUnits += 1;
       const { passed, missing } = evaluateSignals(unit.foundSignals, rule);
       if (!passed) {
@@ -245497,7 +245687,7 @@ function analyzeTargets(targets, config) {
           line: unit.startLine,
           endLine: unit.endLine,
           ruleId: unit.ruleId,
-          severity: rule.severity,
+          impact: resolveFindingImpact(unit, rule),
           kind: unit.kind,
           symbolName: unit.symbolName,
           framework: unit.framework,
@@ -245512,11 +245702,14 @@ function analyzeTargets(targets, config) {
     }
   }
   findings.sort(
-    (a, b) => a.filePath.localeCompare(b.filePath) || a.line - b.line || a.ruleId.localeCompare(b.ruleId)
+    (a, b) => IMPACT_ORDER[a.impact] - IMPACT_ORDER[b.impact] || a.filePath.localeCompare(b.filePath) || a.line - b.line || a.ruleId.localeCompare(b.ruleId)
   );
-  const errorsCount = findings.filter((f) => f.severity === "error").length;
-  const warningsCount = findings.filter((f) => f.severity === "warning").length;
-  const coverageGapCount = findings.filter((f) => f.kind !== "span-name").length;
+  const highImpactCount = findings.filter((f) => f.impact === "high").length;
+  const mediumImpactCount = findings.filter((f) => f.impact === "medium").length;
+  const lowImpactCount = findings.filter((f) => f.impact === "low").length;
+  const coverageGapCount = findings.filter(
+    (f) => f.kind !== "span-name" && f.kind !== "metric-cardinality"
+  ).length;
   const passedUnits = Math.max(0, checkedUnits - coverageGapCount);
   const coveragePercent = checkedUnits === 0 ? 100 : Math.round(passedUnits / checkedUnits * 100);
   return {
@@ -245525,8 +245718,9 @@ function analyzeTargets(targets, config) {
     passedUnits,
     coveragePercent,
     findings,
-    errorsCount,
-    warningsCount
+    highImpactCount,
+    mediumImpactCount,
+    lowImpactCount
   };
 }
 function analyzeDiffFiles(cwd, diffFiles, config) {
@@ -245557,7 +245751,7 @@ var import_node_path4 = __toESM(require("node:path"), 1);
 var import_yaml = __toESM(require_dist(), 1);
 var DEFAULT_CONFIG = {
   version: 1,
-  mode: "comment",
+  blockOn: "none",
   include: [
     "**/*.ts",
     "**/*.js",
@@ -245623,17 +245817,17 @@ var DEFAULT_CONFIG = {
     ]
   },
   rules: {
-    "http-handlers": {
+    "metric-cardinality": {
       enabled: true,
-      severity: "warning",
-      require: ["span", "metric"],
+      impact: "high",
+      require: [],
       matchMode: "any",
-      minLines: 4,
-      description: "HTTP route handlers should emit a custom span or business metric"
+      minLines: 1,
+      description: "Metric labels and attributes must stay low-cardinality to prevent TSDB and billing explosions"
     },
     "queue-consumers": {
       enabled: true,
-      severity: "error",
+      impact: "high",
       require: ["span", "metric"],
       matchMode: "any",
       minLines: 3,
@@ -245641,15 +245835,23 @@ var DEFAULT_CONFIG = {
     },
     "error-swallowing": {
       enabled: true,
-      severity: "warning",
+      impact: "medium",
       require: ["span-error", "log", "metric"],
       matchMode: "any",
       minLines: 1,
       description: "Catch blocks that do not rethrow should record an exception, log, or increment an error metric"
     },
+    "http-handlers": {
+      enabled: true,
+      impact: "medium",
+      require: ["span", "metric"],
+      matchMode: "any",
+      minLines: 4,
+      description: "HTTP route handlers should emit a custom span or business metric"
+    },
     "otel-naming": {
       enabled: true,
-      severity: "warning",
+      impact: "low",
       require: [],
       matchMode: "any",
       minLines: 1,
@@ -245657,28 +245859,81 @@ var DEFAULT_CONFIG = {
     }
   }
 };
+var VALID_IMPACTS = /* @__PURE__ */ new Set(["high", "medium", "low"]);
+var VALID_BLOCK_ON = /* @__PURE__ */ new Set(["none", "high", "medium", "low"]);
+function resolveRuleImpact(rule, fallback) {
+  if (rule?.impact && VALID_IMPACTS.has(rule.impact)) {
+    return rule.impact;
+  }
+  if (rule?.severity === "error") {
+    return "high";
+  }
+  if (rule?.severity === "warning") {
+    return "medium";
+  }
+  return fallback;
+}
+function mergeRule(base, override) {
+  if (!override) {
+    return { ...base };
+  }
+  const { severity: _legacySeverity, ...rest } = override;
+  return {
+    ...base,
+    ...rest,
+    impact: resolveRuleImpact(override, base.impact)
+  };
+}
+function resolveBlockOn(blockOn, legacyMode, fallback = "none") {
+  if (blockOn && VALID_BLOCK_ON.has(blockOn)) {
+    return blockOn;
+  }
+  if (legacyMode === "fail") {
+    return "high";
+  }
+  if (legacyMode === "comment") {
+    return "none";
+  }
+  return fallback;
+}
+function shouldBlockOnImpact(report, blockOn) {
+  switch (blockOn) {
+    case "none":
+      return false;
+    case "high":
+      return report.highImpactCount > 0;
+    case "medium":
+      return report.highImpactCount + report.mediumImpactCount > 0;
+    case "low":
+      return report.findings.length > 0;
+  }
+}
 function mergeConfig(partial) {
   const rules = {
-    "http-handlers": {
-      ...DEFAULT_CONFIG.rules["http-handlers"],
-      ...partial.rules?.["http-handlers"] ?? {}
-    },
-    "queue-consumers": {
-      ...DEFAULT_CONFIG.rules["queue-consumers"],
-      ...partial.rules?.["queue-consumers"] ?? {}
-    },
-    "error-swallowing": {
-      ...DEFAULT_CONFIG.rules["error-swallowing"],
-      ...partial.rules?.["error-swallowing"] ?? {}
-    },
-    "otel-naming": {
-      ...DEFAULT_CONFIG.rules["otel-naming"],
-      ...partial.rules?.["otel-naming"] ?? {}
-    }
+    "metric-cardinality": mergeRule(
+      DEFAULT_CONFIG.rules["metric-cardinality"],
+      partial.rules?.["metric-cardinality"]
+    ),
+    "queue-consumers": mergeRule(
+      DEFAULT_CONFIG.rules["queue-consumers"],
+      partial.rules?.["queue-consumers"]
+    ),
+    "error-swallowing": mergeRule(
+      DEFAULT_CONFIG.rules["error-swallowing"],
+      partial.rules?.["error-swallowing"]
+    ),
+    "http-handlers": mergeRule(
+      DEFAULT_CONFIG.rules["http-handlers"],
+      partial.rules?.["http-handlers"]
+    ),
+    "otel-naming": mergeRule(
+      DEFAULT_CONFIG.rules["otel-naming"],
+      partial.rules?.["otel-naming"]
+    )
   };
   return {
     version: 1,
-    mode: partial.mode ?? DEFAULT_CONFIG.mode,
+    blockOn: resolveBlockOn(partial.blockOn, partial.mode, DEFAULT_CONFIG.blockOn),
     include: partial.include ?? DEFAULT_CONFIG.include,
     exclude: partial.exclude ?? DEFAULT_CONFIG.exclude,
     telemetry: {
@@ -245702,18 +245957,39 @@ function loadConfig(cwd, configPath = ".telemetry-prs.yml") {
       `Unsupported .telemetry-prs.yml version: ${String(parsed.version)} (expected 1)`
     );
   }
+  if (parsed.blockOn !== void 0 && !VALID_BLOCK_ON.has(parsed.blockOn)) {
+    throw new Error(
+      `Invalid blockOn "${String(parsed.blockOn)}" in ${configPath} (expected "none", "high", "medium", or "low")`
+    );
+  }
   if (parsed.mode !== void 0 && parsed.mode !== "comment" && parsed.mode !== "fail") {
     throw new Error(
       `Invalid mode "${String(parsed.mode)}" in ${configPath} (expected "comment" or "fail")`
     );
+  }
+  if (parsed.rules) {
+    for (const [ruleId, ruleCfg] of Object.entries(parsed.rules)) {
+      if (ruleCfg?.impact !== void 0 && !VALID_IMPACTS.has(ruleCfg.impact)) {
+        throw new Error(
+          `Invalid impact "${String(ruleCfg.impact)}" for rule "${ruleId}" in ${configPath} (expected "high", "medium", or "low")`
+        );
+      }
+    }
   }
   return mergeConfig(parsed);
 }
 
 // src/reporter/markdown.ts
 var REPORT_MARKER = "<!-- telemetry-prs-report -->";
-function severityIcon(severity) {
-  return severity === "error" ? "\u{1F534}" : "\u{1F7E1}";
+function impactBadge(impact) {
+  switch (impact) {
+    case "high":
+      return "\u{1F534} high";
+    case "medium":
+      return "\u{1F7E0} medium";
+    case "low":
+      return "\u{1F535} low";
+  }
 }
 function inlineCode2(text) {
   if (!text.includes("`")) {
@@ -245732,6 +246008,19 @@ function formatLocation(filePath, line, options) {
   }
   return label;
 }
+function formatImpactSummary(report) {
+  const parts = [];
+  if (report.highImpactCount > 0) {
+    parts.push(`**${report.highImpactCount}** high`);
+  }
+  if (report.mediumImpactCount > 0) {
+    parts.push(`**${report.mediumImpactCount}** medium`);
+  }
+  if (report.lowImpactCount > 0) {
+    parts.push(`**${report.lowImpactCount}** low`);
+  }
+  return `${parts.join(", ")} impact`;
+}
 function formatPrComment(report, options) {
   const lines = [REPORT_MARKER];
   if (report.findings.length === 0) {
@@ -245742,14 +246031,7 @@ function formatPrComment(report, options) {
     );
     return lines.join("\n");
   }
-  const parts = [];
-  if (report.errorsCount > 0) {
-    parts.push(`**${report.errorsCount}** error${report.errorsCount === 1 ? "" : "s"}`);
-  }
-  if (report.warningsCount > 0) {
-    parts.push(`**${report.warningsCount}** warning${report.warningsCount === 1 ? "" : "s"}`);
-  }
-  lines.push(`### \u{1F52D} Telemetry PRs \u2014 ${parts.join(", ")} in touched code`);
+  lines.push(`### \u{1F52D} Telemetry PRs \u2014 ${formatImpactSummary(report)} in touched code`);
   lines.push("");
   lines.push(
     `Telemetry coverage on touched code: **${report.coveragePercent}%** (${report.passedUnits}/${report.checkedUnits} passed across ${report.checkedFiles} file(s)).`
@@ -245762,13 +246044,13 @@ function formatPrComment(report, options) {
     );
   }
   lines.push("");
-  lines.push("| Severity | Location | Rule | Finding |");
+  lines.push("| Impact | Location | Rule | Finding |");
   lines.push("| :--- | :--- | :--- | :--- |");
   for (const f of report.findings) {
     const loc = formatLocation(f.filePath, f.line, options);
     const rule = `\`${f.ruleId}\``;
     lines.push(
-      `| ${severityIcon(f.severity)} ${f.severity} | ${loc} | ${rule} | ${f.message} |`
+      `| ${impactBadge(f.impact)} | ${loc} | ${rule} | ${f.message} |`
     );
   }
   lines.push("");
@@ -245781,7 +246063,7 @@ function formatPrComment(report, options) {
   }
   lines.push("");
   lines.push(
-    "> To silence a deliberate exception, add `// telemetry-prs-ignore` (or `// telemetry-prs-ignore: <rule-id>`) above the handler, catch block, or span call. Customize rules in `.telemetry-prs.yml`."
+    "> To silence a deliberate exception, add `// telemetry-prs-ignore` (or `// telemetry-prs-ignore: <rule-id>`) above the handler, catch block, metric call, or span call. Customize impact tiers and rules in `.telemetry-prs.yml`."
   );
   lines.push("</details>");
   return lines.join("\n");
@@ -245789,20 +246071,31 @@ function formatPrComment(report, options) {
 
 // src/reporter/sarif.ts
 var RULE_IDS = [
-  "http-handlers",
+  "metric-cardinality",
   "queue-consumers",
   "error-swallowing",
+  "http-handlers",
   "otel-naming"
 ];
+function impactToSarifLevel(impact) {
+  switch (impact) {
+    case "high":
+      return "error";
+    case "medium":
+      return "warning";
+    case "low":
+      return "note";
+  }
+}
 function buildSarifReport(report) {
   const rules = RULE_IDS.map((id) => ({
     id,
     shortDescription: { text: DEFAULT_CONFIG.rules[id].description },
-    defaultConfiguration: { level: DEFAULT_CONFIG.rules[id].severity }
+    defaultConfiguration: { level: impactToSarifLevel(DEFAULT_CONFIG.rules[id].impact) }
   }));
   const results = report.findings.map((finding) => ({
     ruleId: finding.ruleId,
-    level: finding.severity,
+    level: impactToSarifLevel(finding.impact),
     message: { text: `${finding.message} ${finding.suggestion}` },
     locations: [
       {
@@ -245824,7 +246117,7 @@ function buildSarifReport(report) {
         tool: {
           driver: {
             name: "Telemetry PRs",
-            version: "0.1.0",
+            version: "0.2.0",
             informationUri: "https://github.com/telemetry-prs/telemetry-prs",
             rules
           }
@@ -245939,15 +246232,18 @@ async function run() {
   try {
     const cwd = process.cwd();
     const configPath = core.getInput("config") || ".telemetry-prs.yml";
+    const blockOnInput = core.getInput("block-on");
     const modeOverride = core.getInput("mode");
     const token = core.getInput("github-token");
     const commentOnPr = core.getInput("comment-on-pr") !== "false";
     const annotate = core.getInput("annotate") === "true";
     const sarifFile = core.getInput("sarif-file");
     const config = loadConfig(cwd, configPath);
-    if (modeOverride === "comment" || modeOverride === "fail") {
-      config.mode = modeOverride;
-    }
+    config.blockOn = resolveBlockOn(
+      blockOnInput || void 0,
+      modeOverride || void 0,
+      config.blockOn
+    );
     const pr = github.context.payload.pull_request;
     let diffFiles;
     if (pr && token) {
@@ -245963,8 +246259,9 @@ async function run() {
     }
     const report = analyzeDiffFiles(cwd, diffFiles, config);
     core.setOutput("findings-count", String(report.findings.length));
-    core.setOutput("errors-count", String(report.errorsCount));
-    core.setOutput("warnings-count", String(report.warningsCount));
+    core.setOutput("high-impact-count", String(report.highImpactCount));
+    core.setOutput("medium-impact-count", String(report.mediumImpactCount));
+    core.setOutput("low-impact-count", String(report.lowImpactCount));
     core.setOutput("coverage-percent", String(report.coveragePercent));
     if (sarifFile) {
       const resolvedSarif = import_node_path5.default.resolve(cwd, sarifFile);
@@ -245974,16 +246271,18 @@ async function run() {
     if (annotate) {
       for (const f of report.findings) {
         const props = {
-          title: `Telemetry PRs (${f.ruleId})`,
+          title: `Telemetry PRs (${f.ruleId} \xB7 ${f.impact} impact)`,
           file: f.filePath,
           startLine: f.line,
           endLine: f.endLine
         };
         const msg = `${f.message} ${f.suggestion}`;
-        if (f.severity === "error") {
+        if (f.impact === "high") {
           core.error(msg, props);
-        } else {
+        } else if (f.impact === "medium") {
           core.warning(msg, props);
+        } else {
+          core.notice(msg, props);
         }
       }
     }
@@ -246010,9 +246309,9 @@ async function run() {
         }
       }
     }
-    if (config.mode === "fail" && report.errorsCount > 0) {
+    if (shouldBlockOnImpact(report, config.blockOn)) {
       core.setFailed(
-        `Telemetry PRs found ${report.errorsCount} error-severity instrumentation gap(s).`
+        `Telemetry PRs blocked on ${config.blockOn}-impact threshold (${report.highImpactCount} high, ${report.mediumImpactCount} medium, ${report.lowImpactCount} low impact).`
       );
     }
   } catch (error2) {

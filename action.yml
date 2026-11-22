@@ -1,5 +1,5 @@
 name: 'Telemetry PRs'
-description: 'Catch missing OpenTelemetry spans, metrics, and logs in TypeScript/Node.js pull requests — fast, static, and 100% in your CI.'
+description: 'Catch missing OpenTelemetry spans, metrics, logs, and high-cardinality labels in TypeScript/Node.js pull requests — fast, static, and 100% in your CI.'
 author: 'Telemetry PRs'
 branding:
   icon: 'activity'
@@ -10,8 +10,12 @@ inputs:
     description: 'Path to the .telemetry-prs.yml configuration file'
     required: false
     default: '.telemetry-prs.yml'
+  block-on:
+    description: 'Minimum impact tier that fails CI: "none" (comment only), "high", "medium", or "low"'
+    required: false
+    default: ''
   mode:
-    description: 'Override check mode: "comment" (never fail CI) or "fail" (fail CI on error-severity gaps)'
+    description: 'Legacy alias for block-on: "comment" (none) or "fail" (high)'
     required: false
     default: ''
   github-token:
@@ -23,7 +27,7 @@ inputs:
     required: false
     default: 'true'
   annotate:
-    description: 'Emit inline GitHub Actions warning/error annotations on changed lines'
+    description: 'Emit inline GitHub Actions annotations on changed lines'
     required: false
     default: 'false'
   sarif-file:
@@ -33,13 +37,15 @@ inputs:
 
 outputs:
   findings-count:
-    description: 'Total number of telemetry gaps found in the PR diff'
-  errors-count:
-    description: 'Number of error-severity telemetry gaps'
-  warnings-count:
-    description: 'Number of warning-severity telemetry gaps'
+    description: 'Total number of telemetry gaps and cardinality risks found in the PR diff'
+  high-impact-count:
+    description: 'Number of high-impact findings (blind-spot workers, cardinality risks)'
+  medium-impact-count:
+    description: 'Number of medium-impact findings (swallowed errors, uninstrumented HTTP handlers)'
+  low-impact-count:
+    description: 'Number of low-impact findings (generic or empty span names)'
   coverage-percent:
-    description: 'Percentage of touched handlers, workers, catch blocks, and spans passing telemetry checks'
+    description: 'Percentage of touched handlers, workers, and catch blocks passing telemetry checks'
 
 runs:
   using: 'node24'

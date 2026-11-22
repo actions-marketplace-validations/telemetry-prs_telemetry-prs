@@ -1,4 +1,4 @@
-import type { AnalysisReport, Finding } from '../types.ts';
+import type { AnalysisReport, Impact } from '../types.ts';
 
 export const REPORT_MARKER = '<!-- telemetry-prs-report -->';
 
@@ -7,8 +7,26 @@ export interface FormatPrCommentOptions {
   headSha?: string;
 }
 
-function severityIcon(severity: Finding['severity']): string {
-  return severity === 'error' ? '🔴' : '🟡';
+function impactBadge(impact: Impact): string {
+  switch (impact) {
+    case 'high':
+      return '🔴 high';
+    case 'medium':
+      return '🟠 medium';
+    case 'low':
+      return '🔵 low';
+  }
+}
+
+function terminalImpactTag(impact: Impact): string {
+  switch (impact) {
+    case 'high':
+      return 'HIGH';
+    case 'medium':
+      return 'MED ';
+    case 'low':
+      return 'LOW ';
+  }
 }
 
 function inlineCode(text: string): string {
@@ -38,6 +56,20 @@ function formatLocation(
   return label;
 }
 
+function formatImpactSummary(report: AnalysisReport): string {
+  const parts: string[] = [];
+  if (report.highImpactCount > 0) {
+    parts.push(`**${report.highImpactCount}** high`);
+  }
+  if (report.mediumImpactCount > 0) {
+    parts.push(`**${report.mediumImpactCount}** medium`);
+  }
+  if (report.lowImpactCount > 0) {
+    parts.push(`**${report.lowImpactCount}** low`);
+  }
+  return `${parts.join(', ')} impact`;
+}
+
 export function formatPrComment(
   report: AnalysisReport,
   options?: FormatPrCommentOptions,
@@ -53,15 +85,7 @@ export function formatPrComment(
     return lines.join('\n');
   }
 
-  const parts: string[] = [];
-  if (report.errorsCount > 0) {
-    parts.push(`**${report.errorsCount}** error${report.errorsCount === 1 ? '' : 's'}`);
-  }
-  if (report.warningsCount > 0) {
-    parts.push(`**${report.warningsCount}** warning${report.warningsCount === 1 ? '' : 's'}`);
-  }
-
-  lines.push(`### 🔭 Telemetry PRs — ${parts.join(', ')} in touched code`);
+  lines.push(`### 🔭 Telemetry PRs — ${formatImpactSummary(report)} in touched code`);
   lines.push('');
   lines.push(
     `Telemetry coverage on touched code: **${report.coveragePercent}%** (${report.passedUnits}/${report.checkedUnits} passed across ${report.checkedFiles} file(s)).`,
@@ -82,14 +106,14 @@ export function formatPrComment(
   }
 
   lines.push('');
-  lines.push('| Severity | Location | Rule | Finding |');
+  lines.push('| Impact | Location | Rule | Finding |');
   lines.push('| :--- | :--- | :--- | :--- |');
 
   for (const f of report.findings) {
     const loc = formatLocation(f.filePath, f.line, options);
     const rule = `\`${f.ruleId}\``;
     lines.push(
-      `| ${severityIcon(f.severity)} ${f.severity} | ${loc} | ${rule} | ${f.message} |`,
+      `| ${impactBadge(f.impact)} | ${loc} | ${rule} | ${f.message} |`,
     );
   }
 
@@ -105,7 +129,7 @@ export function formatPrComment(
 
   lines.push('');
   lines.push(
-    '> To silence a deliberate exception, add `// telemetry-prs-ignore` (or `// telemetry-prs-ignore: <rule-id>`) above the handler, catch block, or span call. Customize rules in `.telemetry-prs.yml`.',
+    '> To silence a deliberate exception, add `// telemetry-prs-ignore` (or `// telemetry-prs-ignore: <rule-id>`) above the handler, catch block, metric call, or span call. Customize impact tiers and rules in `.telemetry-prs.yml`.',
   );
   lines.push('</details>');
 
@@ -118,7 +142,7 @@ export function formatTerminalReport(report: AnalysisReport): string {
   }
 
   const lines: string[] = [
-    `Telemetry PRs: ${report.coveragePercent}% coverage (${report.passedUnits}/${report.checkedUnits} passed) — found ${report.findings.length} gap(s) (${report.errorsCount} error(s), ${report.warningsCount} warning(s)) across ${report.checkedFiles} file(s):`,
+    `Telemetry PRs: ${report.coveragePercent}% coverage (${report.passedUnits}/${report.checkedUnits} passed) — found ${report.findings.length} gap(s) (${report.highImpactCount} high, ${report.mediumImpactCount} medium, ${report.lowImpactCount} low impact) across ${report.checkedFiles} file(s):`,
   ];
 
   if (
@@ -137,8 +161,7 @@ export function formatTerminalReport(report: AnalysisReport): string {
   lines.push('');
 
   for (const f of report.findings) {
-    const tag = f.severity === 'error' ? 'ERROR' : 'WARN ';
-    lines.push(`  [${tag}] ${f.filePath}:${f.line} (${f.ruleId})`);
+    lines.push(`  [${terminalImpactTag(f.impact)}] ${f.filePath}:${f.line} (${f.ruleId})`);
     lines.push(`          ${f.message}`);
     lines.push(`          Hint: ${f.suggestion}`);
   }

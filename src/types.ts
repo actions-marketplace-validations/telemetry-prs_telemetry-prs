@@ -1,12 +1,15 @@
 export type CheckMode = 'comment' | 'fail';
 
+export type Impact = 'high' | 'medium' | 'low';
+
+export type BlockOn = 'none' | Impact;
+
 export type RuleId =
   | 'http-handlers'
   | 'queue-consumers'
   | 'error-swallowing'
-  | 'otel-naming';
-
-export type Severity = 'error' | 'warning';
+  | 'otel-naming'
+  | 'metric-cardinality';
 
 export type SignalKind = 'span' | 'span-error' | 'metric' | 'log';
 
@@ -23,7 +26,7 @@ export interface TelemetryPatterns {
 
 export interface RuleConfig {
   enabled: boolean;
-  severity: Severity;
+  impact: Impact;
   require: SignalKind[];
   matchMode: MatchMode;
   minLines: number;
@@ -32,7 +35,7 @@ export interface RuleConfig {
 
 export interface TelemetryConfig {
   version: 1;
-  mode: CheckMode;
+  blockOn: BlockOn;
   include: string[];
   exclude: string[];
   telemetry: TelemetryPatterns;
@@ -46,7 +49,12 @@ export interface DiffFile {
 
 export interface CodeUnit {
   ruleId: RuleId;
-  kind: 'http-handler' | 'queue-consumer' | 'catch-block' | 'span-name';
+  kind:
+    | 'http-handler'
+    | 'queue-consumer'
+    | 'catch-block'
+    | 'span-name'
+    | 'metric-cardinality';
   symbolName: string;
   framework: string;
   startLine: number;
@@ -57,6 +65,8 @@ export interface CodeUnit {
   rethrows?: boolean;
   spanNameIssue?: SpanNameIssue;
   spanNameRaw?: string;
+  cardinalityLabels?: string[];
+  cardinalityValues?: string[];
 }
 
 export interface Finding {
@@ -64,7 +74,7 @@ export interface Finding {
   line: number;
   endLine: number;
   ruleId: RuleId;
-  severity: Severity;
+  impact: Impact;
   kind: CodeUnit['kind'];
   symbolName: string;
   framework: string;
@@ -89,7 +99,8 @@ export interface AnalysisReport {
   passedUnits: number;
   coveragePercent: number;
   findings: Finding[];
-  errorsCount: number;
-  warningsCount: number;
+  highImpactCount: number;
+  mediumImpactCount: number;
+  lowImpactCount: number;
   repoTelemetry?: RepoTelemetryStatus;
 }
