@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="Telemetry PRs logo" width="96" />
+</p>
+
 # Telemetry PRs
 
 Catch missing OpenTelemetry spans, metrics, and logs in TypeScript/Node.js pull requests — **fast, static, vendor-neutral, and 100% inside your CI**.
