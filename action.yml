@@ -1,5 +1,5 @@
 name: 'Telemetry PRs'
-description: 'Catch missing OpenTelemetry spans, metrics, logs, and high-cardinality labels in TypeScript/Node.js pull requests — fast, static, and 100% in your CI.'
+description: 'Catch missing OpenTelemetry spans, metrics, logs, and high-cardinality labels in TS/Node PRs — static, in-CI.'
 author: 'Telemetry PRs'
 branding:
   icon: 'activity'
