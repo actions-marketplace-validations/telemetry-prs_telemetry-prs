@@ -245259,25 +245259,32 @@ function formatList(items, conjunction) {
   if (items.length === 2) return `${items[0]} ${conjunction} ${items[1]}`;
   return `${items.slice(0, -1).join(", ")}, ${conjunction} ${items[items.length - 1]}`;
 }
+function inlineCode(text) {
+  if (!text.includes("`")) {
+    return `\`${text}\``;
+  }
+  const pad = text.startsWith("`") || text.endsWith("`") ? " " : "";
+  return `\`\`${pad}${text}${pad}\`\``;
+}
 function buildMessage(unit, rule, missing) {
   const needText = formatList(missing, rule.matchMode === "all" ? "and" : "or");
   switch (unit.kind) {
     case "http-handler":
-      return `HTTP handler \`${unit.symbolName}\` has no custom ${needText} instrumentation.`;
+      return `HTTP handler ${inlineCode(unit.symbolName)} has no custom ${needText} instrumentation.`;
     case "queue-consumer":
-      return `Background worker \`${unit.symbolName}\` has no ${needText} instrumentation.`;
+      return `Background worker ${inlineCode(unit.symbolName)} has no ${needText} instrumentation.`;
     case "catch-block":
-      return `Catch block \`${unit.symbolName}\` swallows errors without ${needText}.`;
+      return `Catch block ${inlineCode(unit.symbolName)} swallows errors without ${needText}.`;
     case "span-name":
       switch (unit.spanNameIssue) {
         case "high-cardinality":
-          return `Span name \`${unit.spanNameRaw ?? unit.symbolName}\` is high-cardinality (dynamic interpolation/concatenation); dynamic values belong in \`span.setAttribute(...)\`.`;
+          return `Span name ${inlineCode(unit.spanNameRaw ?? unit.symbolName)} is high-cardinality (dynamic interpolation/concatenation); dynamic values belong in \`span.setAttribute(...)\`.`;
         case "empty-name":
-          return `Span call \`${unit.symbolName}\` uses an empty or whitespace-only span name.`;
+          return `Span call ${inlineCode(unit.symbolName)} uses an empty or whitespace-only span name.`;
         case "generic-name":
-          return `Span name \`${unit.spanNameRaw ?? unit.symbolName}\` is too generic to identify operations in traces.`;
+          return `Span name ${inlineCode(unit.spanNameRaw ?? unit.symbolName)} is too generic to identify operations in traces.`;
         default:
-          return `Span call \`${unit.symbolName}\` violates OpenTelemetry naming guidelines.`;
+          return `Span call ${inlineCode(unit.symbolName)} violates OpenTelemetry naming guidelines.`;
       }
   }
 }
@@ -245557,6 +245564,13 @@ var REPORT_MARKER = "<!-- telemetry-prs-report -->";
 function severityIcon(severity) {
   return severity === "error" ? "\u{1F534}" : "\u{1F7E1}";
 }
+function inlineCode2(text) {
+  if (!text.includes("`")) {
+    return `\`${text}\``;
+  }
+  const pad = text.startsWith("`") || text.endsWith("`") ? " " : "";
+  return `\`\`${pad}${text}${pad}\`\``;
+}
 function formatLocation(filePath, line, options) {
   const label = `\`${filePath}:${line}\``;
   if (options?.repoUrl && options?.headSha) {
@@ -245605,7 +245619,7 @@ function formatPrComment(report, options) {
   lines.push("");
   for (const f of report.findings) {
     const loc = formatLocation(f.filePath, f.line, options);
-    lines.push(`- **${loc}** (\`${f.symbolName}\`): ${f.suggestion}`);
+    lines.push(`- **${loc}** (${inlineCode2(f.symbolName)}): ${f.suggestion}`);
   }
   lines.push("");
   lines.push(
@@ -245770,7 +245784,7 @@ async function run() {
     const modeOverride = core.getInput("mode");
     const token = core.getInput("github-token");
     const commentOnPr = core.getInput("comment-on-pr") !== "false";
-    const annotate = core.getInput("annotate") !== "false";
+    const annotate = core.getInput("annotate") === "true";
     const sarifFile = core.getInput("sarif-file");
     const config = loadConfig(cwd, configPath);
     if (modeOverride === "comment" || modeOverride === "fail") {

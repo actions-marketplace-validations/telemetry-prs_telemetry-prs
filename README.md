@@ -47,7 +47,7 @@ node dist/cli.cjs init --workflow
 | `mode` | `comment` | `comment` (report only) or `fail` (exit non-zero on `error`-severity gaps) |
 | `github-token` | `${{ github.token }}` | Token for reading PR diffs and updating the PR comment |
 | `comment-on-pr` | `true` | Post/update a single summary comment on the PR |
-| `annotate` | `true` | Emit inline file/line annotations on changed lines |
+| `annotate` | `false` | Emit inline file/line annotations on changed lines (opt-in to keep diffs quiet) |
 | `sarif-file` | `""` | Optional path to write SARIF 2.1.0 output for GitHub Code Scanning |
 
 Outputs: `findings-count`, `errors-count`, `warnings-count`, `coverage-percent`.

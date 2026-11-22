@@ -25,7 +25,7 @@ inputs:
   annotate:
     description: 'Emit inline GitHub Actions warning/error annotations on changed lines'
     required: false
-    default: 'true'
+    default: 'false'
   sarif-file:
     description: 'Optional output path to write a SARIF 2.1.0 report for GitHub Code Scanning'
     required: false

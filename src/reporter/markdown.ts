@@ -11,6 +11,14 @@ function severityIcon(severity: Finding['severity']): string {
   return severity === 'error' ? '🔴' : '🟡';
 }
 
+function inlineCode(text: string): string {
+  if (!text.includes('`')) {
+    return `\`${text}\``;
+  }
+  const pad = text.startsWith('`') || text.endsWith('`') ? ' ' : '';
+  return `\`\`${pad}${text}${pad}\`\``;
+}
+
 function formatLocation(
   filePath: string,
   line: number,
@@ -77,7 +85,7 @@ export function formatPrComment(
 
   for (const f of report.findings) {
     const loc = formatLocation(f.filePath, f.line, options);
-    lines.push(`- **${loc}** (\`${f.symbolName}\`): ${f.suggestion}`);
+    lines.push(`- **${loc}** (${inlineCode(f.symbolName)}): ${f.suggestion}`);
   }
 
   lines.push('');

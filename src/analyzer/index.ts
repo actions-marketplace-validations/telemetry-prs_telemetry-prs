@@ -78,26 +78,34 @@ function formatList(items: string[], conjunction: 'and' | 'or'): string {
   return `${items.slice(0, -1).join(', ')}, ${conjunction} ${items[items.length - 1]}`;
 }
 
+function inlineCode(text: string): string {
+  if (!text.includes('`')) {
+    return `\`${text}\``;
+  }
+  const pad = text.startsWith('`') || text.endsWith('`') ? ' ' : '';
+  return `\`\`${pad}${text}${pad}\`\``;
+}
+
 function buildMessage(unit: CodeUnit, rule: RuleConfig, missing: SignalKind[]): string {
   const needText = formatList(missing, rule.matchMode === 'all' ? 'and' : 'or');
 
   switch (unit.kind) {
     case 'http-handler':
-      return `HTTP handler \`${unit.symbolName}\` has no custom ${needText} instrumentation.`;
+      return `HTTP handler ${inlineCode(unit.symbolName)} has no custom ${needText} instrumentation.`;
     case 'queue-consumer':
-      return `Background worker \`${unit.symbolName}\` has no ${needText} instrumentation.`;
+      return `Background worker ${inlineCode(unit.symbolName)} has no ${needText} instrumentation.`;
     case 'catch-block':
-      return `Catch block \`${unit.symbolName}\` swallows errors without ${needText}.`;
+      return `Catch block ${inlineCode(unit.symbolName)} swallows errors without ${needText}.`;
     case 'span-name':
       switch (unit.spanNameIssue) {
         case 'high-cardinality':
-          return `Span name \`${unit.spanNameRaw ?? unit.symbolName}\` is high-cardinality (dynamic interpolation/concatenation); dynamic values belong in \`span.setAttribute(...)\`.`;
+          return `Span name ${inlineCode(unit.spanNameRaw ?? unit.symbolName)} is high-cardinality (dynamic interpolation/concatenation); dynamic values belong in \`span.setAttribute(...)\`.`;
         case 'empty-name':
-          return `Span call \`${unit.symbolName}\` uses an empty or whitespace-only span name.`;
+          return `Span call ${inlineCode(unit.symbolName)} uses an empty or whitespace-only span name.`;
         case 'generic-name':
-          return `Span name \`${unit.spanNameRaw ?? unit.symbolName}\` is too generic to identify operations in traces.`;
+          return `Span name ${inlineCode(unit.spanNameRaw ?? unit.symbolName)} is too generic to identify operations in traces.`;
         default:
-          return `Span call \`${unit.symbolName}\` violates OpenTelemetry naming guidelines.`;
+          return `Span call ${inlineCode(unit.symbolName)} violates OpenTelemetry naming guidelines.`;
       }
   }
 }

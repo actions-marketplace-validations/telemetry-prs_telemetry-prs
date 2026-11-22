@@ -147,7 +147,7 @@ async function run(): Promise<void> {
     const modeOverride = core.getInput('mode') as CheckMode | '';
     const token = core.getInput('github-token');
     const commentOnPr = core.getInput('comment-on-pr') !== 'false';
-    const annotate = core.getInput('annotate') !== 'false';
+    const annotate = core.getInput('annotate') === 'true';
     const sarifFile = core.getInput('sarif-file');
 
     const config = loadConfig(cwd, configPath);

@@ -999,3 +999,20 @@ export async function onRequestGet({ request, env, waitUntil }: any) {
     ],
   );
 });
+
+test('formatPrComment safely fences symbols containing backticks', () => {
+  const code = `
+async function run(id: string) {
+  await tracer.startActiveSpan(\`refund-\${id}\`, async (span) => {
+    span.end();
+  });
+}
+`;
+  const report = analyzeTargets(
+    [{ filePath: 'src/refund.ts', content: code }],
+    DEFAULT_CONFIG,
+  );
+  const md = formatPrComment(report);
+  assert.ok(md.includes('`` `refund-${id}` ``'));
+  assert.ok(md.includes('(``startActiveSpan(`refund-${id}`)``)'));
+});
